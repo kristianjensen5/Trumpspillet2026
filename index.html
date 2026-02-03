@@ -1098,7 +1098,7 @@
   let tweetCount = 0;
   // INPUT_GLOBAL_KEYDOWN
   addEventListener('keydown', e => {
-    const k = e.key.toLowerCase();
+    const k = (e.key || '').toLowerCase();
     let handled = false;
     
     // Intro screen handling
@@ -1147,22 +1147,7 @@
     }
     if (GS.over && k === 'r' && e.shiftKey) {
       // Full game restart - go back to intro screen
-      resetStateDefaults();
-      inventory.length = 0; 
-      collectedCoins = 0; // Reset coin counter
-      player.goldBalance = 0;
-      renderInv();
-      player.baseSpeedMul = 1;
-      player.goldenShoesOn = false;
-      updatePlayerSpeedMul();
-      player.tanLevel = 0; 
-      player.capOn = false; 
-      player.speedBoost10 = false; player.healthBoost18 = false; player.masterCollector = false; // Reset coin rewards
-      renderHUD();
-      GS.over = false;
-      GS.overText = '';
-      scene = 'intro';
-      document.getElementById('intro').style.display = 'block';
+      fullRestartToIntro('A_gameOver_shiftR');
       handled = true;
     if (handled) e.preventDefault();
     return;
@@ -1231,19 +1216,11 @@
       // Reset handling
       else if (k==='r') {
         if (e.shiftKey){ // hard reset
-          resetStateDefaults();
-          inventory.length = 0; 
-          collectedCoins = 0; // Reset coin counter
-          player.goldBalance = 0;
-          renderInv();
-          player.baseSpeedMul = 1; player.goldenShoesOn = false; updatePlayerSpeedMul();
-          player.tanLevel = 0; player.capOn = false; 
-          player.speedBoost10 = false; player.healthBoost18 = false; player.masterCollector = false; // Reset coin rewards
-          renderHUD();
+          fullRestartRun('B_shiftR_ingame');
         } else {
           resetStateDefaults();
         }
-        if (scene==='greenland') resetGreenland(); else resetOval();
+        if (scene===SCENE.GREENLAND) resetGreenland(); else resetOval();
         handled = true;
       }
       
@@ -1435,6 +1412,56 @@
   
   // ---------- Game State Variables ----------
   let scene = 'intro'; // 'intro' | 'greenland' | 'oval' | 'kremlin' | 'epstein'
+  // Centralized scene keys (avoid magic strings)
+  const SCENE = {
+    INTRO: 'intro',
+    GREENLAND: 'greenland',
+    OVAL: 'oval',
+    KREMLIN: 'kremlin',
+    EPSTEIN: 'epstein',
+    GOLF: 'golf'
+  };
+
+  // Scene registry (minimal: maps scene -> hooks; preserves existing behavior)
+  const SCENES = {
+    [SCENE.INTRO]: {
+      // no reset
+    },
+
+    [SCENE.GREENLAND]: {
+      reset: function(){ resetGreenland(); }
+    },
+
+    [SCENE.OVAL]: {
+      reset: function(){
+        resetOval();
+        playEntryHeli('Back at the Resolute Desk — the best!', 160*CFG.SCALE);
+      }
+    },
+
+    [SCENE.KREMLIN]: {
+      reset: function(){
+        resetKremlin();
+        playEntryHeli('Very strong handshake incoming.', 160*CFG.SCALE);
+      }
+    },
+
+    [SCENE.EPSTEIN]: {
+      reset: function(){ resetEpstein(); },
+      uiPlacement: 'epsteinTop'
+    },
+
+    // Golf is entered elsewhere (startGolf). We only preserve the leave hook here.
+    [SCENE.GOLF]: {
+      enter: function(params){
+        params = params || {};
+        golfEnter(params.entry, params.opts);
+      },
+      onLeave: function(){
+        try { golfUnbindInput(); } catch(_){}
+      }
+    }
+  };
   let introStartTime = 0;
   const world = { floor: 120 };
   let borderDraw = null; // Add this here too
@@ -1729,10 +1756,14 @@
     scheduleHeliIntro('Perfect landing! Welcome to Greenland!');
   }
 // SCENE_ROUTING_STARTGAME (END)
-  window.startGolf = function(entry, opts){
+  function startGolf(entry, opts){
+    switchScene(SCENE.GOLF, { entry, opts });
+  }
+
+  function golfEnter(entry, opts){
     if (entry && typeof entry === 'object' && !Array.isArray(entry) && !opts){
       opts = entry;
-      entry = null;
+      entry = (opts && typeof opts.entry === 'string') ? opts.entry : null;
     }
 
     if (typeof entry === 'string'){
@@ -1784,7 +1815,16 @@
     }
 
     golfStartCourse(opts);
-  };
+  }
+
+  function exitGolf(nextSceneKey, reason){
+    try { if (GOLF && GOLF.tutorial) GOLF.tutorial.active = false; } catch(_){}
+    try { golfUnbindInput(); } catch(_){}
+    const to = nextSceneKey || SCENE.GREENLAND;
+    switchScene(to);
+  }
+
+  window.startGolf = startGolf;
 
   // Add click handlers to intro UI
   const introEl = document.getElementById('intro');
@@ -2525,6 +2565,8 @@
     introActive: false,
     introDismissReady: false,
     introShown: false,
+    tutorial: { active:false, dismissReady:false },
+    tutorialShown: false,
     biden: null,
     bidenPlan: null,
     bidenTimer: null
@@ -2539,6 +2581,11 @@
   const MAGNET_SPEED = 220; // apply magnet only below this speed
   const MAGNET_STRENGTH = 1200; // px/s^2 toward cup center
   const GOLF_HELI_SCALE = 1.0;
+  const GOLF_HOLE_CONFIG = {
+    1: { bidenDx: 50, bidenDy: 0,  par: null, bidenStrokes: 4 },
+    2: { bidenDx: 0,  bidenDy: -330, par: 5,  bidenStrokes: 7 },
+    3: { bidenDx: 50, bidenDy: 0,  par: null, bidenStrokes: 4, displayId: 19 }
+  };
   const GOLF_PREVIEW_BASE = 70;
   const GOLF_PREVIEW_EXTRA = 190;
   const GOLF_KEY_CHARGE_RATE = 1.2; // per second normalised charge
@@ -2611,11 +2658,42 @@
     GOLF.aimPreviewLength = GOLF_PREVIEW_BASE;
   }
 
+  const ASSET_BASE = 'assets/';
+
+  function normalizeAssetPath(p){
+    if (!p || typeof p !== 'string') return p;
+    // absolute URL or root-relative paths should be left unchanged
+    if (/^(https?:)?\/\//.test(p) || p.startsWith('/')) return p;
+    // already prefixed
+    if (p.startsWith(ASSET_BASE)) return p;
+    return ASSET_BASE + p;
+  }
+
   function loadGolfCourseFromDOM(id){
     const el = document.getElementById(id||'course-mar-a-lago');
     if (!el) return null;
     try {
-      return JSON.parse(el.textContent.trim());
+      const course = JSON.parse(el.textContent.trim());
+      if (!course || typeof course !== 'object') return course;
+
+      course.bg = normalizeAssetPath(course.bg);
+      course.image = normalizeAssetPath(course.image);
+
+      (course.layers || []).forEach(l => {
+        if (l && l.src) l.src = normalizeAssetPath(l.src);
+      });
+
+      (course.holes || []).forEach(h => {
+        if (!h) return;
+        if (h.bg) h.bg = normalizeAssetPath(h.bg);
+        if (h.image) h.image = normalizeAssetPath(h.image);
+        if (h.overlay) h.overlay = normalizeAssetPath(h.overlay);
+        (h.layers || []).forEach(l => {
+          if (l && l.src) l.src = normalizeAssetPath(l.src);
+        });
+      });
+
+      return course;
     } catch(err){
       console.warn('Failed to parse golf course data', err);
       return null;
@@ -2895,6 +2973,12 @@
     if (!GOLF.course || !GOLF.course.holes[index]) return;
     GOLF.holeIndex = index;
     GOLF.hole = GOLF.course.holes[index];
+    const holeNum = (GOLF.hole && typeof GOLF.hole.id === 'number') ? GOLF.hole.id : (index + 1);
+    const holeCfg = GOLF_HOLE_CONFIG[holeNum] || {};
+    if (holeCfg.par != null){
+      if (!Array.isArray(GOLF.course.par)) GOLF.course.par = [];
+      GOLF.course.par[index] = holeCfg.par;
+    }
     // Load Lottie data if specified (async, will apply when ready)
     golfEnsureLottieData(GOLF.hole).catch(()=>{});
     // Use PNG overlay rails when requested or when no Lottie is present
@@ -2942,14 +3026,16 @@
     GOLF.bidenAvatar = { x: baseX, y: bidenY };
     GOLF._finishedHole = false;
     GOLF.bidenSpeech = null;
-    GOLF.banner = { text: `Hole ${GOLF.hole.id}`, until: nowMs()+2600, onDone: null };
+    const holeConfig = GOLF_HOLE_CONFIG[GOLF.holeIndex + 1] || {};
+    const holeDisplayId = holeConfig.displayId || GOLF.hole.id;
+    GOLF.banner = { text: `Hole ${holeDisplayId}`, until: nowMs()+2600, onDone: null };
     GOLF.lastUpdate = nowMs();
     if (GOLF.opts?.versus !== false){
       const prevBiden = GOLF.biden;
       const spawnB = GOLF.hole.spawn || GOLF.hole.tee || { x: startX, y: startY };
       const teeRect = GOLF.hole.teeRect || {x: (spawnB.x||startX)-24, y: (spawnB.y||startY)-24, w: 48, h:48};
       const holePar = (GOLF.course?.par || [])[GOLF.holeIndex] || 3;
-      const bidenStrokes = Math.max(2, holePar); // Biden "already played" with par strokes
+      const bidenStrokes = holeConfig.bidenStrokes || Math.max(2, holePar); // Biden's strokes per hole
       // Position Biden at the cup (he's already finished)
       const cup = GOLF.hole.cup || { x: startX + 80, y: startY - 80 };
       const bidenCupX = clamp(cup.x + 70, bounds.x + 32, bounds.x + bounds.w - 32);
@@ -2997,6 +3083,8 @@
     if (GOLF.bidenTimer){ clearTimeout(GOLF.bidenTimer); GOLF.bidenTimer=null; }
     GOLF.biden = null;
     GOLF.turn = 'player';
+    GOLF.tutorial = { active:false, dismissReady:false };
+    GOLF.tutorialShown = false;
     GOLF.introActive = true;
     GOLF.introDismissReady = false;
     GOLF.introShown = false;
@@ -3004,8 +3092,6 @@
     // Bind golf-specific pointer handlers once per scene start
     try { golfBindInput(); } catch(_){}
     golfResetHole(0);
-    setTimeout(()=>{ GOLF.introDismissReady = true; }, 150);
-    scene = 'golf';
     try { golfStartArrival(opts); } catch(_){}
     GS.over = false;
     GS.overMode = null;
@@ -3102,25 +3188,37 @@
       GOLF.biden._booked = true;
     }
     if (next >= (GOLF.course?.holes.length||0)){
-      const finalize = () => {
-        GOLF.state = 'scorecard';
-        const total = GOLF.strokes.reduce((a,b)=>a+b,0);
-        const parTotal = (GOLF.course?.par||[]).reduce((a,b)=>a+b,0);
-        const joeTotal = GOLF.biden ? GOLF.biden.total : 0;
-        GOLF.scorecard = {
-          total,
-          par: parTotal,
-          joe: joeTotal,
-          diff: total - (parTotal||0),
-          shownAt: nowMs()
+      const total = GOLF.strokes.reduce((a,b)=>a+b,0);
+      const joeTotal = GOLF.biden ? GOLF.biden.total : 0;
+      const playerWon = joeTotal > 0 && total < joeTotal;
+
+      if (playerWon) {
+        // Victory sequence - stay on course, drop trophy onto Trump
+        const startVictory = () => {
+          GOLF.state = 'victory_ingame';
+          GOLF.victoryStart = nowMs();
+          GOLF.trophyLanded = false;
+          // Start trophy drop after short delay
+          setTimeout(() => { try { startGolfTrophyDrop(); } catch(_){} }, 800);
         };
-        // Award golf medal if player beat Biden
-        if (joeTotal > 0 && total < joeTotal) {
-          awardMedal('golf');
-        }
-      };
-      golfShowBanner('Course complete!', 2000, finalize);
-      GOLF.state = 'banner';
+        golfShowBanner('Best golfer ever!', 1500, startVictory);
+        GOLF.state = 'banner';
+      } else {
+        // Loss - show scorecard as before
+        const finalize = () => {
+          GOLF.state = 'scorecard';
+          const parTotal = (GOLF.course?.par||[]).reduce((a,b)=>a+b,0);
+          GOLF.scorecard = {
+            total,
+            par: parTotal,
+            joe: joeTotal,
+            diff: total - (parTotal||0),
+            shownAt: nowMs()
+          };
+        };
+        golfShowBanner('Course complete!', 2000, finalize);
+        GOLF.state = 'banner';
+      }
     } else {
       golfResetHole(next);
     }
@@ -3527,7 +3625,7 @@
     GOLF.bidenSpeech = { text: line };
   }
 
-  function golfBubble(text,x,y,right=false, speaker='aide', scale=1.8){
+  function golfBubble(text,x,y,right=false, speaker='aide', scale=1.8, tailTarget){
     const pad = GAME_CONSTANTS.UI.BUBBLE_PADDING * scale;
     const fontSize = GAME_CONSTANTS.UI.BUBBLE_FONT_SIZE * CFG.SCALE * scale;
     const lineH = GAME_CONSTANTS.UI.BUBBLE_LINE_HEIGHT * CFG.SCALE * scale;
@@ -3539,6 +3637,8 @@
     const tailY = GAME_CONSTANTS.UI.BUBBLE_TAIL_Y * CFG.SCALE * scale;
     const bx = right? x - w - tailOff : x + tailOff;
     const by = y - GAME_CONSTANTS.UI.BUBBLE_Y_OFFSET*CFG.SCALE*scale;
+    const tx = (tailTarget && typeof tailTarget.x === 'number') ? tailTarget.x : x;
+    const ty = (tailTarget && typeof tailTarget.y === 'number') ? tailTarget.y : y;
     const palettes = GAME_CONSTANTS.UI.BUBBLE_PALETTES || {};
     const pal = palettes[speaker] || palettes.default || { fill:'rgba(0,0,0,.7)', stroke:'rgba(255,255,255,.85)', text:'#fff', tail:'rgba(0,0,0,.7)' };
     ctx.fillStyle=pal.fill; ctx.strokeStyle=pal.stroke;
@@ -3546,8 +3646,8 @@
     ctx.fillStyle=pal.text; lines.forEach((ln,i)=>ctx.fillText(ln, bx+pad, by+lineH*(i+0.7)));
     ctx.beginPath();
     ctx.fillStyle=pal.tail;
-    if (right){ ctx.moveTo(x-10*scale,y-tailY); ctx.lineTo(bx+w-6*scale,by+h/2-4*scale); ctx.lineTo(bx+w-6*scale,by+h/2+4*scale); }
-    else { ctx.moveTo(x+10*scale,y-tailY); ctx.lineTo(bx+6*scale,by+h/2-4*scale); ctx.lineTo(bx+6*scale,by+h/2+4*scale); }
+    if (right){ ctx.moveTo(tx-10*scale,ty-tailY); ctx.lineTo(bx+w-6*scale,by+h/2-4*scale); ctx.lineTo(bx+w-6*scale,by+h/2+4*scale); }
+    else { ctx.moveTo(tx+10*scale,ty-tailY); ctx.lineTo(bx+6*scale,by+h/2-4*scale); ctx.lineTo(bx+6*scale,by+h/2+4*scale); }
     ctx.closePath(); ctx.fill();
   }
 
@@ -3654,7 +3754,17 @@
         GOLF.clubPicked = true;
         GOLF.state = 'intro';
         GOLF.introActive = true;
-        GOLF.introDismissReady = true;
+        GOLF.introDismissReady = false;
+        if (!GOLF.tutorialShown){
+          GOLF.tutorial = { active:true, dismissReady:false };
+          setTimeout(()=>{ 
+            if (scene !== 'golf') return;
+            if (GOLF.tutorial && GOLF.tutorial.active) GOLF.tutorial.dismissReady = true;
+            GOLF.introDismissReady = true; 
+          }, 300);
+        } else {
+          GOLF.introDismissReady = true;
+        }
       }
       return;
     }
@@ -3838,8 +3948,8 @@
           ctx.drawImage(img, GOLF.hole.bounds.x, GOLF.hole.bounds.y, GOLF.hole.bounds.w, GOLF.hole.bounds.h);
         } catch(_){}
       }
-      // Normalize fairway tone on hole 2 (overlay is too bright)
-      if (GOLF.hole.id === 2 && Array.isArray(GOLF.hole.surfaces)){
+      // Normalize fairway tone on hole 2 and 3 (overlay is too bright)
+      if ((GOLF.hole.id === 2 || GOLF.hole.id === 3) && Array.isArray(GOLF.hole.surfaces)){
         const fairways = GOLF.hole.surfaces.filter(s=>s && s.type === 'fairway' && s.poly);
         if (fairways.length){
           ctx.save();
@@ -3851,6 +3961,46 @@
         }
       }
       // Optional debug frame around bounds (disabled)
+
+      // Bone easter egg on Hole 19 (hole index 2)
+      if (GOLF.holeIndex === 2 && GOLF.hole.bounds){
+        const drawBone = (bx, by, rotation, scale = 1) => {
+          ctx.save();
+          ctx.translate(bx, by);
+          ctx.rotate(rotation);
+          ctx.scale(scale, scale);
+          ctx.fillStyle = '#e8e4d9';
+          ctx.strokeStyle = '#a89f8f';
+          ctx.lineWidth = 1;
+          // Bone shaft
+          ctx.beginPath();
+          ctx.roundRect(-2, -18, 4, 36, 2);
+          ctx.fill(); ctx.stroke();
+          // Top knob
+          ctx.beginPath();
+          ctx.arc(-3, -18, 4, 0, Math.PI*2);
+          ctx.arc(3, -18, 4, 0, Math.PI*2);
+          ctx.fill(); ctx.stroke();
+          // Bottom knob
+          ctx.beginPath();
+          ctx.arc(-3, 18, 4, 0, Math.PI*2);
+          ctx.arc(3, 18, 4, 0, Math.PI*2);
+          ctx.fill(); ctx.stroke();
+          ctx.restore();
+        };
+        // First bone - bottom left
+        drawBone(
+          GOLF.hole.bounds.x + GOLF.hole.bounds.w * 0.12,
+          GOLF.hole.bounds.y + GOLF.hole.bounds.h * 0.85,
+          -0.3, 1
+        );
+        // Second bone - slightly offset, different angle
+        drawBone(
+          GOLF.hole.bounds.x + GOLF.hole.bounds.w * 0.08,
+          GOLF.hole.bounds.y + GOLF.hole.bounds.h * 0.78,
+          0.8, 0.85
+        );
+      }
     }
     if (GOLF.hole && Array.isArray(GOLF.hole.penalties)){
       ctx.fillStyle = 'rgba(30,90,200,0.28)';
@@ -3892,6 +4042,32 @@
       ctx.beginPath();
       ctx.arc(cup.x, cup.y, (cup.r||14)*0.55, 0, Math.PI*2);
       ctx.fill();
+      // Golf flag with hole number
+      const flagPoleHeight = 60;
+      const flagW = 28, flagH = 18;
+      const poleX = cup.x + 2;
+      const poleTopY = cup.y - flagPoleHeight;
+      // Pole
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(poleX, cup.y);
+      ctx.lineTo(poleX, poleTopY);
+      ctx.stroke();
+      // Flag (triangular)
+      ctx.fillStyle = '#e63946';
+      ctx.beginPath();
+      ctx.moveTo(poleX, poleTopY);
+      ctx.lineTo(poleX + flagW, poleTopY + flagH/2);
+      ctx.lineTo(poleX, poleTopY + flagH);
+      ctx.closePath();
+      ctx.fill();
+      // Hole number on flag
+      const holeDispId = (GOLF_HOLE_CONFIG[GOLF.holeIndex + 1]?.displayId) || GOLF.hole?.id || (GOLF.holeIndex + 1);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 11px system-ui';
+      ctx.textAlign = 'left';
+      ctx.fillText(String(holeDispId), poleX + 4, poleTopY + flagH/2 + 4);
     }
 
     // Draw parked helicopter after landing (in screen coords)
@@ -4031,6 +4207,68 @@
       } else {
         drawTrumpGolfStanding(ctx, GOLF.playerStand.x, GOLF.playerStand.y, trumpScale);
       }
+      // Trophy drop animation during victory_ingame state
+      if (GOLF.state === 'victory_ingame' && golfTrophyDrop){
+        const trophyX = GOLF.playerStand.x;
+        const trophyTargetY = GOLF.playerStand.y - 55;
+        if (golfTrophyDrop.active){
+          const dt = Math.min(0.05, (nowMs() - (golfTrophyDrop._lastUpdate || nowMs())) / 1000);
+          golfTrophyDrop._lastUpdate = nowMs();
+          golfTrophyDrop.vy += 280*dt;
+          golfTrophyDrop.y += golfTrophyDrop.vy*dt;
+          golfTrophyDrop.swingPhase += dt*4;
+          golfTrophyDrop.swingAmp *= 0.992;
+          if (golfTrophyDrop.y >= trophyTargetY){
+            golfTrophyDrop.y = trophyTargetY;
+            golfTrophyDrop.active = false;
+            GOLF.trophyLanded = true;
+            GS.achievements.golf = true;
+            // Confetti in screen coords
+            const view = GOLF.view || { scale:1, ox:0, oy:0 };
+            const confX = trophyX * view.scale + view.ox;
+            const confY = trophyTargetY * view.scale + view.oy;
+            spawnConfetti(confX, confY, 60);
+            try { SFX.achievement(); } catch(_){}
+          }
+        }
+        // Draw trophy (falling or landed)
+        const trophyDrawY = golfTrophyDrop.active ? golfTrophyDrop.y : trophyTargetY;
+        const angle = golfTrophyDrop.active ? Math.sin(golfTrophyDrop.swingPhase) * golfTrophyDrop.swingAmp : 0;
+        ctx.save();
+        ctx.translate(trophyX, trophyDrawY);
+        ctx.rotate(angle);
+        const tw = 18, th = 24;
+        // Base
+        ctx.fillStyle = '#8B4513';
+        ctx.fillRect(-tw/3, th/2 - 5, tw*2/3, 5);
+        // Stem
+        ctx.fillStyle = '#DAA520';
+        ctx.fillRect(-2, 0, 4, th/2);
+        // Cup
+        ctx.fillStyle = '#FFD700';
+        ctx.beginPath();
+        ctx.moveTo(-tw/2, -th/3);
+        ctx.quadraticCurveTo(-tw/2, 0, -3, 0);
+        ctx.lineTo(3, 0);
+        ctx.quadraticCurveTo(tw/2, 0, tw/2, -th/3);
+        ctx.lineTo(tw/2 - 2, -th/2);
+        ctx.lineTo(-tw/2 + 2, -th/2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#B8860B';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        // Handles
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(-tw/2 - 3, -th/4, 4, -Math.PI/2, Math.PI/2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(tw/2 + 3, -th/4, 4, Math.PI/2, -Math.PI/2);
+        ctx.stroke();
+        ctx.restore();
+      }
       if (GOLF.clubPicked){
         const clubX = (GOLF.state === 'approach' && GOLF.approach) ? GOLF.approach.x : GOLF.playerStand.x;
         const clubY = (GOLF.state === 'approach' && GOLF.approach) ? GOLF.approach.y : GOLF.playerStand.y;
@@ -4048,14 +4286,21 @@
         ctx.arc(bb.x, bb.y, bb.r, 0, Math.PI*2);
         ctx.fill();
       }
-      drawBidenGolfStanding(ctx, GOLF.bidenAvatar.x, GOLF.bidenAvatar.y, 1.08);
+      const holeNum = (GOLF.hole && typeof GOLF.hole.id === 'number') ? GOLF.hole.id : (GOLF.holeIndex + 1);
+      const holeCfg = GOLF_HOLE_CONFIG[holeNum] || {};
+      const bidenDx = holeCfg.bidenDx || 0;
+      const bidenDy = holeCfg.bidenDy || 0;
+      const bidenScale = 1.08;
+      const bidenX = GOLF.bidenAvatar.x + bidenDx;
+      const bidenY = GOLF.bidenAvatar.y + bidenDy;
+      drawBidenGolfStanding(ctx, bidenX, bidenY, bidenScale);
       const cup = GOLF.hole?.cup || { x: bb.x, y: bb.y };
-      const bidenFacing = (GOLF.bidenAvatar.x <= cup.x) ? 1 : -1;
-      drawGolfClubInHand(ctx, GOLF.bidenAvatar.x, GOLF.bidenAvatar.y, 1.08, bidenFacing);
+      const bidenFacing = (bidenX <= cup.x) ? 1 : -1;
+      drawGolfClubInHand(ctx, bidenX, bidenY, bidenScale, bidenFacing);
       // Draw stroke count above Biden's head
       if (GOLF.biden._finishedHole && GOLF.biden.strokesHole > 0) {
-        const bx = GOLF.bidenAvatar.x;
-        const by = GOLF.bidenAvatar.y - 70;
+        const bx = bidenX;
+        const by = bidenY - 70;
         ctx.save();
         // Stroke count bubble
         ctx.fillStyle = 'rgba(255,255,255,0.9)';
@@ -4075,12 +4320,14 @@
         ctx.restore();
       }
       if (GOLF.bidenSpeech && GOLF.bidenSpeech.text) {
-        const bx = GOLF.bidenAvatar.x;
-        const by = GOLF.bidenAvatar.y - 92;
+        const bx = bidenX;
+        const by = bidenY - 92;
         const bounds = GOLF.hole?.bounds || { x: 0, y: 0, w: 960, h: 540 };
         // Arrow points TOWARDS Biden: if he's on left side, arrow points left (right=false)
         const right = bx < bounds.x + bounds.w * 0.5;
-        golfBubble(GOLF.bidenSpeech.text, bx, by, right, 'aide', 1.8);
+        const headX = bidenX;
+        const headY = bidenY - 44 * bidenScale;
+        golfBubble(GOLF.bidenSpeech.text, bx, by, right, 'aide', 1.8, { x: headX, y: headY });
       }
     }
 
@@ -4154,7 +4401,8 @@
       const par = (GOLF.course.par||[])[GOLF.holeIndex] || 3;
       const totalHoles = GOLF.course.holes ? GOLF.course.holes.length : 0;
       ctx.font='13px system-ui';
-      ctx.fillText(`Hole ${GOLF.hole?.id||GOLF.holeIndex+1} / ${totalHoles} · Par ${par}`, statsX + 12, statsY + 40);
+      const holeDispId = (GOLF_HOLE_CONFIG[GOLF.holeIndex + 1]?.displayId) || GOLF.hole?.id || (GOLF.holeIndex+1);
+      ctx.fillText(`Hole ${holeDispId} / ${totalHoles} · Par ${par}`, statsX + 12, statsY + 40);
       const playerCurrent = GOLF.totalStrokes + (GOLF.holeBooked ? 0 : GOLF.strokesThisHole);
       const joeCurrent = (GOLF.opts?.versus !== false && GOLF.biden)
         ? (GOLF.biden.total + (GOLF.biden._booked ? 0 : GOLF.biden.strokesHole))
@@ -4178,11 +4426,14 @@
     }
 
     if (GOLF.banner){
-      ctx.fillStyle='rgba(0,0,0,0.7)';
-      const bw = 320, bh = 50;
-      ctx.fillRect(W/2-bw/2, 40, bw, bh);
-      ctx.fillStyle='#fff'; ctx.font='bold 20px system-ui'; ctx.textAlign='center';
-      ctx.fillText(GOLF.banner.text, W/2, 72);
+      ctx.fillStyle='rgba(0,0,0,0.75)';
+      const bw = 340, bh = 56;
+      const bannerY = H/3 - bh/2;
+      ctx.fillRect(W/2-bw/2, bannerY, bw, bh);
+      ctx.strokeStyle='#ffd700'; ctx.lineWidth=2;
+      ctx.strokeRect(W/2-bw/2, bannerY, bw, bh);
+      ctx.fillStyle='#fff'; ctx.font='bold 22px system-ui'; ctx.textAlign='center';
+      ctx.fillText(GOLF.banner.text, W/2, bannerY + 36);
       ctx.textAlign='left';
     }
 
@@ -4201,7 +4452,8 @@
       const parArr = GOLF.course.par || [];
       GOLF.course.holes.forEach((hole, idx)=>{
         const rowY = cy + 110 + idx*28;
-        ctx.fillText(`${hole.id||idx+1}`, cx + cardW/4, rowY);
+        const holeDispId = (GOLF_HOLE_CONFIG[idx + 1]?.displayId) || hole.id || (idx+1);
+        ctx.fillText(`${holeDispId}`, cx + cardW/4, rowY);
         ctx.fillText(`${parArr[idx]||3}`, cx + cardW/2, rowY);
         ctx.fillText(`${GOLF.strokes[idx]||0}`, cx + 3*cardW/4, rowY);
       });
@@ -4219,20 +4471,137 @@
       ctx.font='13px system-ui';
       ctx.fillText('Press Enter to exit', W/2, totalY+56);
       ctx.textAlign='left';
+
+      // Golf trophy drop overlay (after beating Biden)
+      if (golfTrophyDrop && golfTrophyDrop.active){
+        const dt = Math.min(0.05, (nowMs() - (golfTrophyDrop._lastUpdate || nowMs())) / 1000);
+        golfTrophyDrop._lastUpdate = nowMs();
+        const targetX = W/2;
+        const targetY = cy + cardH/2;
+        // Physics
+        golfTrophyDrop.vy += 300*dt*CFG.SCALE;
+        golfTrophyDrop.y += golfTrophyDrop.vy*dt;
+        golfTrophyDrop.swingPhase += dt*4;
+        golfTrophyDrop.swingAmp *= 0.992;
+        const angle = Math.sin(golfTrophyDrop.swingPhase) * golfTrophyDrop.swingAmp;
+        if (golfTrophyDrop.y >= targetY){
+          golfTrophyDrop.y = targetY;
+          golfTrophyDrop.active = false;
+          GS.achievements.golf = true;
+          spawnConfetti(targetX, targetY, 60);
+          try { SFX.achievement(); } catch(_){}
+        }
+        // Draw FIFA-style trophy (gold cup)
+        ctx.save();
+        ctx.translate(targetX, golfTrophyDrop.y);
+        ctx.rotate(angle);
+        // Trophy base
+        const tw = 24*CFG.SCALE, th = 32*CFG.SCALE;
+        ctx.fillStyle = '#8B4513';
+        ctx.fillRect(-tw/3, th/2 - 6*CFG.SCALE, tw*2/3, 6*CFG.SCALE);
+        // Trophy stem
+        ctx.fillStyle = '#DAA520';
+        ctx.fillRect(-3*CFG.SCALE, 0, 6*CFG.SCALE, th/2);
+        // Trophy cup
+        ctx.fillStyle = '#FFD700';
+        ctx.beginPath();
+        ctx.moveTo(-tw/2, -th/3);
+        ctx.quadraticCurveTo(-tw/2, 0, -4*CFG.SCALE, 0);
+        ctx.lineTo(4*CFG.SCALE, 0);
+        ctx.quadraticCurveTo(tw/2, 0, tw/2, -th/3);
+        ctx.lineTo(tw/2 - 2*CFG.SCALE, -th/2);
+        ctx.lineTo(-tw/2 + 2*CFG.SCALE, -th/2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = '#B8860B';
+        ctx.lineWidth = 2*CFG.SCALE;
+        ctx.stroke();
+        // Handles
+        ctx.strokeStyle = '#FFD700';
+        ctx.lineWidth = 3*CFG.SCALE;
+        ctx.beginPath();
+        ctx.arc(-tw/2 - 4*CFG.SCALE, -th/4, 6*CFG.SCALE, -Math.PI/2, Math.PI/2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(tw/2 + 4*CFG.SCALE, -th/4, 6*CFG.SCALE, Math.PI/2, -Math.PI/2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       ctx.restore();
       return;
     }
 
-    if (GOLF.state === 'intro'){
-      // Reset transform to draw info card in screen coordinates
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      // Center info card on screen
-      const w = Math.min(520, W-120);
-      const h = Math.min(260, H-140);
-      const x = W/2 - w/2;
-      const y = H/2 - h/2;
+    // Victory in-game state - show exit prompt when trophy landed
+    if (GOLF.state === 'victory_ingame' && GOLF.trophyLanded){
+      const promptW = 260, promptH = 40;
+      const promptX = W/2 - promptW/2;
+      const promptY = H - 70;
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(promptX, promptY, promptW, promptH);
+      ctx.strokeStyle = '#ffd700';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(promptX, promptY, promptW, promptH);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 16px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('Press Enter to continue', W/2, promptY + 26);
+      ctx.textAlign = 'left';
+    }
+
+    // Always draw tutorial overlay if active (independent of GOLF.state)
+    if (GOLF.tutorial && GOLF.tutorial.active){
+      ctx.save();
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      const CW = ctx.canvas.width / (DPR || 1);
+      const CH = ctx.canvas.height / (DPR || 1);
+      const w = Math.min(520, CW-120);
+      const h = Math.min(260, CH-140);
+      const x = CW/2 - w/2;
+      const y = CH/2 - h/2;
+
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(0,0,W,H);
+      ctx.fillRect(0,0,CW,CH);
+      ctx.fillStyle = '#f8f1d2';
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = '#c59a31'; ctx.lineWidth=4;
+      ctx.strokeRect(x, y, w, h);
+
+      // Genbrug din eksisterende tekst (hold den identisk)
+      ctx.fillStyle = '#2a2a2a';
+      ctx.font = 'bold 24px system-ui';
+      ctx.textAlign='center';
+      ctx.fillText('Trump vs. Sleepy Joe', x + w/2, y + 78);
+      ctx.font = '15px system-ui';
+      ctx.fillText('Du må ikke tabe denne duel.', x + w/2, y + 110);
+      ctx.font = '14px system-ui';
+      ctx.fillText('Træk fra tee væk fra hullet for at sigte og vælge kraft.', x + w/2, y + 144);
+      ctx.fillText('Slip for at skyde. Tastatur: piletaster + mellemrum.', x + w/2, y + 168);
+
+      const bidenScore = GOLF.biden?.strokesHole || 3;
+      ctx.fillText(`Sleepy Joe brugte ${bidenScore} slag. Slå ham!`, x + w/2, y + 192);
+
+      ctx.font = 'bold 14px system-ui';
+      ctx.fillText('Tryk på en tast for at begynde.', x + w/2, y + h - 34);
+
+      ctx.textAlign='left';
+      ctx.restore();
+      return;
+    }
+
+    if (GOLF.state === 'intro' && !(GOLF.tutorial && GOLF.tutorial.active) && !GOLF.tutorialShown){
+      ctx.save();
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      const CW = ctx.canvas.width / (DPR || 1);
+      const CH = ctx.canvas.height / (DPR || 1);
+      // Reset transform to draw info card in screen coordinates
+      // Center info card on screen
+      const w = Math.min(520, CW-120);
+      const h = Math.min(260, CH-140);
+      const x = CW/2 - w/2;
+      const y = CH/2 - h/2;
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0,0,CW,CH);
       ctx.fillStyle = '#f8f1d2';
       ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = '#c59a31'; ctx.lineWidth=4;
@@ -4262,6 +4631,20 @@
 
   function golfHandleKeyDown(e, key){
     if (scene !== 'golf') return false;
+    // Tutorial overlay consumes first key presses to avoid instant dismiss from previous scene
+    if (GOLF.tutorial && GOLF.tutorial.active){
+      if (!GOLF.tutorial.dismissReady) return true;
+      GOLF.tutorial.active = false;
+      GOLF.tutorialShown = true;
+      // fortsæt i golf efter tutorial: typisk approach eller aim
+      // Brug din eksisterende flow-logik her:
+      if (GOLF.state === 'intro') {
+        GOLF.introActive = false;
+        GOLF.state = 'aim';
+        GOLF.turn = 'player';
+      }
+      return true;
+    }
     if (GOLF.state === 'arrival') return true;
     if (GOLF.state === 'approach'){
       if (key==='arrowleft' || key==='arrowright' || key==='arrowup' || key==='arrowdown'){
@@ -4282,10 +4665,19 @@
         GOLF.state = 'aim';
         GOLF.scorecard = null;
         GOLF.banner = null;
-        switchScene('greenland');
+        exitGolf(SCENE.GREENLAND, 'golf_end');
         return true;
       }
       return false;
+    }
+    if (GOLF.state === 'victory_ingame'){
+      if ((key==='enter' || e.code==='Enter') && GOLF.trophyLanded){
+        GOLF.state = 'aim';
+        GOLF.banner = null;
+        exitGolf(SCENE.GREENLAND, 'golf_win');
+        return true;
+      }
+      return true; // Block other inputs during victory
     }
     if (key==='r'){
       if (GOLF.state !== 'scorecard'){
@@ -4296,7 +4688,7 @@
     if (key==='escape' || key==='esc'){
       GOLF.banner = null;
       if (GOLF.bidenTimer){ clearTimeout(GOLF.bidenTimer); GOLF.bidenTimer=null; }
-      switchScene('greenland');
+      exitGolf(SCENE.GREENLAND, 'golf_escape');
       return true;
     }
     if (GOLF.state === 'banner' && GOLF.banner && (key==='enter' || e.code==='Enter')){
@@ -4565,6 +4957,32 @@
   // ║  Initialize/reset each scene to starting state                             ║
   // ╚════════════════════════════════════════════════════════════════════════════╝
 
+  // --------- Full restart helpers (centralized) ----------
+  // NOTE: Must preserve current behavior. These functions only centralize repeated blocks.
+
+  function fullRestartRun(reason){
+    // Hard reset of run state during gameplay (verbatim from existing Shift+R hard reset)
+    resetStateDefaults();
+    inventory.length = 0;
+    collectedCoins = 0; // Reset coin counter
+    player.goldBalance = 0;
+    renderInv();
+    player.baseSpeedMul = 1; player.goldenShoesOn = false; updatePlayerSpeedMul();
+    player.tanLevel = 0; player.capOn = false;
+    player.speedBoost10 = false; player.healthBoost18 = false; player.masterCollector = false; // Reset coin rewards
+    renderHUD();
+  }
+
+  function fullRestartToIntro(reason){
+    // Full game restart - go back to intro screen (verbatim from existing GS.over Shift+R block)
+    fullRestartRun(reason);
+
+    GS.over = false;
+    GS.overText = '';
+    scene = SCENE.INTRO; // was 'intro'
+    document.getElementById('intro').style.display = 'block';
+  }
+
   // Helper: Generate coins array from GAME_CONSTANTS config
   function createCoinsFromConfig(configKey) {
     const g = H - world.floor;
@@ -4578,7 +4996,7 @@
   }
 // SCENE_GREENLAND (START)
   function resetStateDefaults(){
-    GL.state = { flagPlanted:false, bearGone:false, hasTweeted:false, glaciersBlown:false, hasSeenGlaciers:false, mineFlagPlanted:false, larsDialogRounds:0, larsMiniGameStarted:false };
+    GL.state = { flagPlanted:false, bearGone:false, hasTweeted:false, glaciersBlown:false, hasSeenGlaciers:false, mineFlagPlanted:false, larsDialogRounds:0, larsMiniGameStarted:false, larsDialogOnComplete:null, larsFightRequested:false };
     shopTutorialShown = false;
     if (invEl){
       invEl.classList.add('hidden');
@@ -4946,7 +5364,9 @@
     if (isCorrect) {
       d.correctAnswers++;
       d.approvalRating = Math.min(100, (d.approvalRating || 0) + 33); // +33% (1/3) per correct
-      if (d.approvalRating >= 100) awardMedal('oval');
+      if (d.approvalRating >= 100) {
+        try { startOvalMedalDrop(); } catch(_){}
+      }
       const responseText = answer === 'yes' ? guest.yesText : guest.noText;
       say(player, responseText, 1800);
       d.answerFeedback = { correct: true, text: 'MAGA godkender! ✓', until: nowMs() + 2000 };
@@ -6067,19 +6487,38 @@
   }
 
   // SCENE_EPSTEIN (END)
-  function switchScene(to){
-    // Unbind golf inputs if leaving golf
-    if (scene === 'golf') { try { golfUnbindInput(); } catch(_){} }
+  function switchScene(to, params){
+    const from = scene;
+
+    // Leave hook (preserves: golfUnbindInput when leaving golf)
+    try {
+      const fromDef = SCENES[from];
+      if (fromDef && typeof fromDef.onLeave === 'function') {
+        fromDef.onLeave();
+      }
+    } catch(_){}
+
     scene = to;
-    if (scene==='greenland') { resetGreenland(); }
-    else if (scene==='oval') { resetOval(); playEntryHeli('Back at the Resolute Desk — the best!', 160*CFG.SCALE); }
-    else if (scene==='kremlin') { resetKremlin(); playEntryHeli('Very strong handshake incoming.', 160*CFG.SCALE); }
-    else if (scene==='epstein') { resetEpstein(); }
+
+    // Reset/enter for new scene (preserves existing per-scene behavior)
+    try {
+      const def = SCENES[scene];
+      if (def && typeof def.reset === 'function') {
+        def.reset();
+      }
+      if (def && typeof def.enter === 'function') {
+        def.enter(params);
+      }
+    } catch(_){}
+
     // Adjust UI position per scene (avoid bottom-left overlap in Epstein)
     try {
       const ui = document.querySelector('.ui');
       if (ui){
-        if (scene==='epstein') {
+        const def = SCENES[scene];
+        const epsteinTop = def && def.uiPlacement === 'epsteinTop';
+
+        if (epsteinTop) {
           ui.style.top = '12px';
           ui.style.bottom = 'auto'; // override class bottom to avoid stretching
         } else {
@@ -6130,6 +6569,466 @@
     return (bd < CFG.INTERACT_DIST*CFG.SCALE) ? best : null;
   }
 
+  function startGreenlandLarsDialogue(opts){
+    const cb = opts && typeof opts.onComplete === 'function' ? opts.onComplete : null;
+    if (cb) GL.state.larsDialogOnComplete = cb;
+  }
+
+  const FightEngine = {
+    active: false,
+    meta: null,
+    trumpHPMax: 100,
+    trumpHP: 100,
+    larsHPMax: 100,
+    larsHP: 100,
+    keys: new Set(),
+    trumpPunch: { active:false, t:0, duration:160, cooldown:260, last:-9999, hit:false },
+    // Lars fight AI state
+    lars: { bobT:0, offsetX:0, jab:{ active:false, t:0, duration:180, cooldown:900, last:-9999, nextAt:0 } },
+    _keyHandler: null,
+    _keyUpHandler: null,
+    // Countdown intro: phases are title(0-1.6s) → 3(1.6-2.4) → 2(2.4-3.2) → 1(3.2-4.0) → FIGHT!(4.0-4.6) → go
+    countdown: null, // { startTime, duration:4600 }
+    start(opts){
+      if (this.active) return;
+      this.active = true;
+      this.meta = opts || null;
+      this.countdown = { startTime: nowMs(), duration: 4600 };
+      this.lars.bobT = 0; this.lars.offsetX = 0;
+      this.lars.jab = { active:false, t:0, duration:180, cooldown:900, last:-9999, nextAt: nowMs() + 5600 };
+      try { window.__fightOverlayActive = true; } catch(_){}
+      try { this.keys && this.keys.clear && this.keys.clear(); } catch(_){}
+      try { if (walkTween) walkTween = null; } catch(_){}
+      try { player.walking = false; player.walkCycle = 0; } catch(_){}
+      try { player.speakingUntil = 0; player.say = ''; } catch(_){}
+      try { GL.mette.speakingUntil = 0; GL.mette.say = ''; } catch(_){}
+      try { if (entryHeli && entryHeli.active) entryHeli.active = false; } catch(_){}
+      try { if (cvs) { cvs.tabIndex = 0; cvs.focus(); } } catch(_){}
+      try { window.focus(); } catch(_){}
+      try { if (document && document.body) { document.body.tabIndex = 0; document.body.focus(); } } catch(_){}
+      try { if (document && document.documentElement) { document.documentElement.tabIndex = 0; document.documentElement.focus(); } } catch(_){}
+      if (!this._focusHandler){
+        this._focusHandler = ()=>{
+          try { if (cvs) cvs.focus(); } catch(_){}
+        };
+        try { if (cvs) cvs.addEventListener('pointerdown', this._focusHandler); } catch(_){}
+      }
+    },
+    stop(result){
+      if (!this.active) return;
+      this.active = false;
+      this.meta = null;
+      try { window.__fightOverlayActive = false; } catch(_){}
+      try { window.__fightPunchOut = false; } catch(_){}
+      try { GL.state.larsFightRequested = false; } catch(_){}
+      // Trigger Greenland flag drop when Trump wins
+      if (result && result.winner === 'trump'){
+        try { startGreenlandFlagDrop(); } catch(_){}
+      }
+      if (this._focusHandler){
+        try { if (cvs) cvs.removeEventListener('pointerdown', this._focusHandler); } catch(_){}
+        this._focusHandler = null;
+      }
+    },
+    update(dt){
+      if (!this.active) return;
+      // Block gameplay during countdown intro
+      if (this.countdown){
+        if (nowMs() - this.countdown.startTime >= this.countdown.duration) this.countdown = null;
+        else return;
+      }
+      const now = nowMs();
+      const held = (window && window.__fightKeysHeld && window.__fightKeysHeld.size) ? window.__fightKeysHeld : null;
+      const keySet = held || ((this.keys && this.keys.size) ? this.keys : (typeof keys !== 'undefined' ? keys : this.keys));
+      // Movement (fight overlay)
+      const left = keySet.has('arrowleft') || keySet.has('a');
+      const right = keySet.has('arrowright') || keySet.has('d');
+      const up = keySet.has('arrowup') || keySet.has('w');
+      const down = keySet.has('arrowdown') || keySet.has('s');
+      let dx = (right ? 1 : 0) - (left ? 1 : 0);
+      let dy = (down ? 1 : 0) - (up ? 1 : 0);
+      if (dx || dy){
+        const len = Math.hypot(dx, dy) || 1;
+        const spd = CFG.SPEED * (player.speedMul||1);
+        player.x += (dx/len) * spd * dt * CFG.SCALE;
+        player.facing = dx ? Math.sign(dx) : player.facing;
+        player.walking = true;
+        player.walkCycle += dt * 8;
+      } else {
+        player.walking = false;
+        player.walkCycle = 0;
+      }
+      const g = H - world.floor;
+      const minX = 40*CFG.SCALE, maxX = W - 40*CFG.SCALE;
+      player.x = clamp(player.x, minX, maxX);
+      player.y = g;
+      if (window && window.DEBUG_FIGHT_STATE){
+        try {
+          this._debug = {
+            t: now,
+            dx, dy,
+            x: Math.round(player.x),
+            y: Math.round(player.y),
+            keys: Array.from(this.keys || []).join(','),
+            gkeys: (typeof keys !== 'undefined' && keys) ? Array.from(keys).join(',') : '',
+            hkeys: (window && window.__fightKeysHeld) ? Array.from(window.__fightKeysHeld).join(',') : ''
+          };
+        } catch(_){}
+      }
+
+      const punch = this.trumpPunch;
+      if (punch && punch.active){
+        punch.t += dt * 1000;
+        const p = punch.t / punch.duration;
+        // Apply hit once during mid-phase
+        if (!punch.hit && p >= 0.35 && p <= 0.55){
+          // Simple range check in world space
+          const trumpX = (player && typeof player.x === 'number') ? player.x : 0;
+          const trumpY = (player && typeof player.y === 'number') ? player.y : 0;
+          const larsX = (GL && GL.mette && typeof GL.mette.x === 'number') ? GL.mette.x : 0;
+          const larsY = (GL && GL.mette && typeof GL.mette.y === 'number') ? GL.mette.y : 0;
+          const d = Math.hypot(larsX - trumpX, larsY - trumpY);
+          if (d < 80*CFG.SCALE){
+            this.larsHP = Math.max(0, this.larsHP - 10);
+            punch.hit = true;
+            this._larsFlashUntil = nowMs() + 120; // white flash on hit
+            if (this.larsHP <= 0){
+              try { triggerShake(10*CFG.SCALE, 400); } catch(_){}
+              this.stop({ winner:'trump' });
+              return;
+            }
+          }
+        }
+        if (p >= 1){
+          punch.active = false;
+        }
+      }
+      // ── Lars AI: bob, drift toward Trump, jab cycle ──
+      const L = this.lars;
+      L.bobT += dt * 1000;
+      L.offsetX = Math.sin(L.bobT * 0.004) * 6 * CFG.SCALE;
+      // Slowly drift toward Trump
+      if (GL && GL.mette){
+        const lx = GL.mette.x, tx = player.x;
+        const gap = tx - lx;
+        const desiredDist = 60 * CFG.SCALE;
+        if (Math.abs(gap) > desiredDist){
+          GL.mette.x += Math.sign(gap) * 30 * CFG.SCALE * dt;
+        }
+      }
+      // Jab cycle
+      const jab = L.jab;
+      if (jab.active){
+        jab.t += dt * 1000;
+        if (jab.t >= jab.duration) jab.active = false;
+      } else if (now >= jab.nextAt){
+        jab.active = true;
+        jab.t = 0;
+        jab.nextAt = now + jab.cooldown + Math.random() * 500;
+      }
+    },
+    draw(ctx){
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const CW = ctx.canvas.width;
+      const CH = ctx.canvas.height;
+      // ── Countdown intro overlay ──
+      if (this.countdown){
+        const elapsed = nowMs() - this.countdown.startTime;
+        const cx = CW/2, cy = CH/2;
+        // Phase timings (ms): title 0-1600, "3" 1600-2400, "2" 2400-3200, "1" 3200-4000, "FIGHT!" 4000-4600
+        const phases = [
+          { t0:0,    t1:1600, text:'FIGHT FOR GREENLAND', size:48, color:'#fff' },
+          { t0:1600, t1:2400, text:'3',                   size:72, color:'#ff4444' },
+          { t0:2400, t1:3200, text:'2',                   size:72, color:'#ffaa00' },
+          { t0:3200, t1:4000, text:'1',                   size:72, color:'#44ff44' },
+          { t0:4000, t1:4600, text:'FIGHT!',              size:64, color:'#ffffff' }
+        ];
+        for (const ph of phases){
+          if (elapsed >= ph.t0 && elapsed < ph.t1){
+            const dur = ph.t1 - ph.t0;
+            const local = elapsed - ph.t0;
+            const fadeIn = Math.min(1, local / 200);
+            const fadeOut = Math.min(1, (dur - local) / 200);
+            const alpha = fadeIn * fadeOut;
+            // Scale punch: start big, settle to 1
+            const scaleK = Math.min(1, local / 150);
+            const scale = 1 + (1 - scaleK) * 0.4;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = ph.color;
+            ctx.font = `bold ${ph.size * CFG.SCALE * scale}px system-ui`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            // Subtle text shadow
+            ctx.shadowColor = 'rgba(0,0,0,0.7)';
+            ctx.shadowBlur = 12 * CFG.SCALE;
+            ctx.fillText(ph.text, cx, cy);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+            ctx.textBaseline = 'alphabetic';
+            break;
+          }
+        }
+        ctx.restore();
+        return; // Don't draw fight HUD during countdown
+      }
+
+      // ── Normal fight HUD (health bars + arms drawn below) ──
+      if (window && window.DEBUG_FIGHT_STATE){
+        const dbg = this._debug || {};
+        const last = this._debugInput || {};
+        const lastAny = window.__fightInputLastAny || {};
+        const bridgeCount = window.__fightInputBridgeCount || 0;
+        const anyCount = window.__fightInputAnyCount || 0;
+        const bridgeSeen = window.__fightInputBridgeSeen || 0;
+        const bridgeActiveLast = window.__fightInputBridgeActiveLast;
+        const feActiveLast = window.__fightInputFEActiveLast;
+        const overlayActiveLast = window.__fightInputOverlayActiveLast;
+        const overlayActive = !!window.__fightOverlayActive;
+        let feTxt = '';
+        try {
+          const wfe = window.FightEngine || null;
+          feTxt = `wFE:${wfe ? 'yes' : 'no'} same:${wfe === this ? 'yes' : 'no'} wActive:${wfe && wfe.active ? 'yes' : 'no'}`;
+        } catch(_){}
+        let focusTxt = '';
+        try {
+          const ae = document && document.activeElement ? document.activeElement.tagName : '';
+          const hasF = document && document.hasFocus ? document.hasFocus() : true;
+          focusTxt = `focus:${hasF ? 'yes' : 'no'} ${ae || ''}`;
+        } catch(_){}
+        const boxW = 360, boxH = 342;
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        ctx.fillRect(12, 12, boxW, boxH);
+        ctx.fillStyle = '#bfffc2';
+        ctx.font = `16px system-ui`;
+        ctx.textAlign = 'left';
+        ctx.fillText(`dx/dy: ${dbg.dx || 0}/${dbg.dy || 0}`, 24, 44);
+        ctx.fillText(`pos: ${dbg.x || 0}, ${dbg.y || 0}`, 24, 70);
+        ctx.fillText(`keys: ${dbg.keys || ''}`, 24, 96);
+        ctx.fillText(`gkeys: ${dbg.gkeys || ''}`, 24, 122);
+        ctx.fillText(`bridge/any: ${bridgeCount}/${anyCount}`, 24, 148);
+        ctx.fillText(`bridgeSeen: ${bridgeSeen} activeLast:${bridgeActiveLast ? 'yes' : 'no'}`, 24, 172);
+        ctx.fillText(`hkeys: ${dbg.hkeys || ''}`, 24, 196);
+        ctx.fillText(`keyFE:${feActiveLast ? 'yes' : 'no'} keyOverlay:${overlayActiveLast ? 'yes' : 'no'}`, 24, 220);
+        ctx.fillText(`overlayActive: ${overlayActive ? 'yes' : 'no'}`, 24, 244);
+        if (focusTxt) ctx.fillText(focusTxt, 24, 268);
+        if (feTxt) ctx.fillText(feTxt, 24, 292);
+        if (last.k || last.code){
+          ctx.fillText(`last: ${last.k || ''} ${last.code || ''}`, 24, 316);
+        } else if (lastAny.k || lastAny.code){
+          ctx.fillText(`lastAny: ${lastAny.k || ''} ${lastAny.code || ''}`, 24, 316);
+        }
+      }
+      // Health bars in world coordinates (match sprite space)
+      ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      const trumpX = (player && typeof player.x === 'number') ? player.x : (W * 0.35);
+      const trumpY = (player && typeof player.y === 'number') ? player.y : (H * 0.55);
+      const larsBaseX = (GL && GL.mette && typeof GL.mette.x === 'number') ? GL.mette.x : (W * 0.65);
+      const larsX = larsBaseX + (this.lars ? this.lars.offsetX : 0);
+      const larsY = (GL && GL.mette && typeof GL.mette.y === 'number') ? GL.mette.y : (H * 0.55);
+      // ── Trump arm rig (jacket-colored, snaps between idle/punch, holds phone) ──
+      const S = CFG.SCALE;
+      const punch = this.trumpPunch;
+      const trumpFacing = (player && player.facing) ? player.facing : 1;
+      {
+        const shoulderX = trumpX + trumpFacing * 6*S;
+        const shoulderY = trumpY - 24*S;
+        const thick = 5*S;
+        const punching = punch && punch.active;
+        const p = punching ? Math.max(0, Math.min(1, punch.t / punch.duration)) : 0;
+        // Snap: pos1 (idle) vs pos2 (extended). Switch at 15% in, back at 65%.
+        const out = punching && p >= 0.15 && p < 0.65;
+        // Expose punch-out state so drawTrumpFallback can offset the phone
+        window.__fightPunchOut = out;
+        // Only draw arm when punching (pos 2) — in idle it's hidden behind the sprite
+        if (out){
+          const elbowX = shoulderX + trumpFacing * 10*S;
+          const elbowY = shoulderY + 2*S;
+          const wristX = shoulderX + trumpFacing * 24*S;
+          const wristY = shoulderY + 0*S;
+          ctx.strokeStyle = '#7a5328'; ctx.lineWidth = thick; ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.moveTo(shoulderX, shoulderY); ctx.lineTo(elbowX, elbowY); ctx.stroke();
+          ctx.lineWidth = thick * 0.85;
+          ctx.beginPath(); ctx.moveTo(elbowX, elbowY); ctx.lineTo(wristX, wristY); ctx.stroke();
+        }
+      }
+      // ── Lars arm rig (jacket-colored, guard pose / jab snap) ──
+      {
+        const larsFacing = (trumpX < larsX) ? -1 : 1;
+        const shoulderX = larsX + larsFacing * 5*S;
+        const shoulderY = larsY - 22*S;
+        const thick = 4.5*S;
+        const jabbing = this.lars && this.lars.jab && this.lars.jab.active;
+        if (jabbing){
+          // Jab: arm extended forward (only visible when out)
+          const elbowX = shoulderX + larsFacing * 8*S;
+          const elbowY = shoulderY + 2*S;
+          const wristX = shoulderX + larsFacing * 20*S;
+          const wristY = shoulderY + 0*S;
+          ctx.strokeStyle = '#1a1a2e'; ctx.lineWidth = thick; ctx.lineCap = 'round';
+          ctx.beginPath(); ctx.moveTo(shoulderX, shoulderY); ctx.lineTo(elbowX, elbowY); ctx.stroke();
+          ctx.lineWidth = thick * 0.85;
+          ctx.beginPath(); ctx.moveTo(elbowX, elbowY); ctx.lineTo(wristX, wristY); ctx.stroke();
+          ctx.fillStyle = '#f4c59a';
+          ctx.beginPath(); ctx.arc(wristX, wristY, 3*S, 0, Math.PI*2); ctx.fill();
+        }
+        // Guard (idle): arm hidden behind sprite, same approach as Trump
+      }
+      // ── Impact flash on Lars ──
+      if (this._larsFlashUntil && nowMs() < this._larsFlashUntil){
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = '#ffffff';
+        // Cover Lars sprite area (approx 20x40 centered on position)
+        ctx.fillRect(larsX - 10*S, larsY - 44*S, 20*S, 44*S);
+        ctx.globalAlpha = 1;
+      }
+      const barW = 70*CFG.SCALE;
+      const barH = 12*CFG.SCALE;
+      function drawHPBar(name, x, y, hp, maxHp, fillColor, align){
+        const px = x - barW/2;
+        const py = y - 80*CFG.SCALE;
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(px, py, barW, barH);
+        const ratio = Math.max(0, Math.min(1, (maxHp ? hp / maxHp : 0)));
+        ctx.fillStyle = fillColor || '#4caf50';
+        ctx.fillRect(px, py, barW * ratio, barH);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${10*CFG.SCALE}px system-ui`;
+        if (align === 'right'){
+          ctx.textAlign = 'right';
+          ctx.fillText(name, px + barW - 6*CFG.SCALE, py + barH - 3*CFG.SCALE);
+        } else {
+          ctx.textAlign = 'left';
+          ctx.fillText(name, px + 6*CFG.SCALE, py + barH - 3*CFG.SCALE);
+        }
+      }
+      drawHPBar('TRUMP', trumpX, trumpY, this.trumpHP, this.trumpHPMax, '#f39c12', 'left');
+      drawHPBar('LARS', larsX, larsY, this.larsHP, this.larsHPMax, '#2e86de', 'right');
+      ctx.textAlign = 'left';
+      ctx.restore();
+    },
+    handleKeyDown(e){
+      const k = (e.key || '').toLowerCase();
+      if (window && window.DEBUG_FIGHT_KEYS){
+        try { console.log('FightEngine keydown', { key: e.key, code: e.code, keyCode: e.keyCode }); } catch(_){}
+      }
+      // Block all fight input during countdown intro
+      if (this.countdown) return true;
+      if (k === 'arrowleft' || k === 'arrowright' || k === 'arrowup' || k === 'arrowdown' || k === 'a' || k === 'd' || k === 'w' || k === 's'){
+        this.keys.add(k);
+        return true;
+      }
+      if (k === 'e' || e.code === 'KeyE' || e.keyCode === 69){
+        const punch = this.trumpPunch;
+        const now = nowMs();
+        if (punch && !punch.active && (now - punch.last) >= punch.cooldown){
+          punch.active = true;
+          punch.t = 0;
+          punch.last = now;
+          punch.hit = false;
+        }
+        return true;
+      }
+      if (k === 'q' || e.code === 'KeyQ' || e.keyCode === 81){
+        this.stop({ winner:'trump' });
+        return true;
+      }
+      return true;
+    },
+    handleKeyUp(e){
+      const k = (e.key || '').toLowerCase();
+      if (k) this.keys.delete(k);
+      return true;
+    }
+  };
+  window.FightEngine = FightEngine;
+
+  (function installFightInputBridge(){
+    if (window.__fightInputBridgeInstalled) return;
+    window.__fightInputBridgeInstalled = true;
+    window.__fightInputBridgeCount = 0;
+    window.__fightInputAnyCount = 0;
+    window.__fightKeysHeld = new Set();
+
+    window.addEventListener('keydown', function(e){
+      try {
+        const FE = window.FightEngine || FightEngine;
+        if (!FE) return;
+        const fightFlag = (typeof GL !== 'undefined' && GL.state && GL.state.larsFightRequested);
+        const overlayActive = !!window.__fightOverlayActive;
+        window.__fightInputFEActiveLast = !!FE.active;
+        window.__fightInputOverlayActiveLast = !!overlayActive;
+        window.__fightInputBridgeSeen = (window.__fightInputBridgeSeen || 0) + 1;
+        if ((fightFlag || overlayActive) && !FE.active) { FE.active = true; }
+        const active = !!FE.active || overlayActive;
+        window.__fightInputBridgeActiveLast = active;
+        if (!active && !fightFlag) return;
+        window.__fightInputBridgeCount = (window.__fightInputBridgeCount || 0) + 1;
+
+        const k = (e.key || '').toLowerCase();
+        if (window && window.DEBUG_FIGHT_STATE){
+          try { FE._debugInput = { k, code: e.code || '', t: nowMs() }; } catch(_){}
+        }
+        if (k === 'escape' || k === 'esc') {
+          try { FE.stop({ winner:null, reason:'escape' }); } catch(_){}
+          try { e.preventDefault(); e.stopPropagation(); } catch(_){}
+          return;
+        }
+
+        try { FE.handleKeyDown(e); } catch(err){ console.error(err); }
+        try { e.preventDefault(); e.stopPropagation(); } catch(_){}
+      } catch(_){}
+    }, true);
+
+    window.addEventListener('keyup', function(e){
+      try {
+        const FE = window.FightEngine || FightEngine;
+        if (!FE) return;
+        const fightFlag = (typeof GL !== 'undefined' && GL.state && GL.state.larsFightRequested);
+        const overlayActive = !!window.__fightOverlayActive;
+        if ((fightFlag || overlayActive) && !FE.active) { FE.active = true; }
+        const active = !!FE.active || overlayActive;
+        if (!active && !fightFlag) return;
+        try { FE.handleKeyUp(e); } catch(err){ console.error(err); }
+        try { e.preventDefault(); e.stopPropagation(); } catch(_){}
+      } catch(_){}
+    }, true);
+
+    // Global keydown probe (debug): records any keydown, even if FightEngine isn't active
+    window.addEventListener('keydown', function(e){
+      try {
+        window.__fightInputAnyCount = (window.__fightInputAnyCount || 0) + 1;
+        if (window.__fightKeysHeld){
+          window.__fightKeysHeld.add((e.key || '').toLowerCase());
+        }
+        if (window && window.DEBUG_FIGHT_STATE){
+          try { window.__fightInputLastAny = { k: (e.key||'').toLowerCase(), code: e.code || '' }; } catch(_){}
+        }
+      } catch(_){}
+    }, true);
+    window.addEventListener('keyup', function(e){
+      try {
+        if (window.__fightKeysHeld){
+          window.__fightKeysHeld.delete((e.key || '').toLowerCase());
+        }
+      } catch(_){}
+    }, true);
+  })();
+
+  function finishGreenlandLarsDialogue(){
+    const cb = GL.state.larsDialogOnComplete;
+    GL.state.larsDialogOnComplete = null;
+    if (typeof cb === 'function') { try { cb(); } catch(_){} }
+  }
+
+  function startGreenlandFight(meta){
+    if (GL.state.larsFightRequested) return;
+    GL.state.larsFightRequested = true;
+    GL.state.larsMiniGameStarted = true;
+    FightEngine.start({ opponent:'lokke', meta });
+  }
+
   function startGreenlandLarsMinigame(){
     if (GL.state.larsMiniGameStarted) return;
     GL.state.larsMiniGameStarted = true;
@@ -6158,17 +7057,13 @@
       }
       addInteractionFeedback(obj); // Add visual feedback
       if (obj.type==='mine'){
-        if (GL.mette.blownUp) {
-          if (!GL.state.mineFlagPlanted) {
-            GL.state.mineFlagPlanted = true;
-            say(player, "This mine is now AMERICAN property! 🇺🇸", 2000);
-            spawnSparks(GL.mine.x, GL.mine.y - 30*CFG.SCALE, 15);
-            SFX.success && SFX.success();
-          } else {
-            say(player, "Already claimed this beautiful mine!", 1200);
-          }
+        if (!GL.state.mineFlagPlanted) {
+          GL.state.mineFlagPlanted = true;
+          say(player, "Mine now.", 2000);
+          spawnSparks(GL.mine.x, GL.mine.y - 30*CFG.SCALE, 15);
+          SFX.success && SFX.success();
         } else {
-          say(player, "Nice mine! But I need to deal with Lars first...", 1500);
+          say(player, "Already claimed this beautiful mine!", 1200);
         }
       }
       else if (obj.type==='shop'){
@@ -6240,31 +7135,28 @@
         // TRUMP_ABSURD and METTE_DIPLO loaded from game-text-data JSON block
         const maxRounds = Math.min(TRUMP_ABSURD.length, 5);
         const round = GL.state.larsDialogRounds || 0;
+        if (round === 0 && !GL.state.larsDialogOnComplete){
+          startGreenlandLarsDialogue({ onComplete: () => startGreenlandFight({ source: 'dialogue_end' }) });
+        }
         if (GL.state.larsMiniGameStarted) return;
         if (round >= maxRounds) { startGreenlandLarsMinigame(); return; }
         const trumpResponse = TRUMP_ABSURD[round] || TRUMP_ABSURD[TRUMP_ABSURD.length-1];
         const line = METTE_DIPLO[round];
         // Light relationship nudge only
         adjustRelationship('mette', {respect:-1, trust:-1}, 'absurd-offer');
-        // Show Trump first, then Lars after ~1.2s (if he has a line)
-        // Keep Trump's bubble visible until Lars' bubble has also finished
-        const delayMs = 1200;
-        if (line){
-          const larsDur = 2000;
-          const trumpDur = delayMs + larsDur + 300;
-          say(player, trumpResponse, trumpDur);
-          setTimeout(() => { try { say(GL.mette, line, larsDur); } catch(_){} }, delayMs);
-          GL.state.larsDialogRounds = round + 1;
-          if (GL.state.larsDialogRounds >= maxRounds){
-            setTimeout(() => { try { startGreenlandLarsMinigame(); } catch(_){} }, delayMs + larsDur + 50);
-          }
+        // Show both lines simultaneously; Lars stays until next E press
+        const trumpDur = 2000;
+        const isLastRound = (round + 1) >= maxRounds;
+        say(player, trumpResponse, trumpDur);
+        if (line && !isLastRound){
+          say(GL.mette, line, 120000); // stays until overwritten by next round
         } else {
-          const trumpDur = 1600;
-          say(player, trumpResponse, trumpDur);
-          GL.state.larsDialogRounds = round + 1;
-          if (GL.state.larsDialogRounds >= maxRounds){
-            setTimeout(() => { try { startGreenlandLarsMinigame(); } catch(_){} }, trumpDur + 50);
-          }
+          // Clear Lars's bubble on last round (fight announcement)
+          GL.mette.speakingUntil = 0; GL.mette.say = '';
+        }
+        GL.state.larsDialogRounds = round + 1;
+        if (isLastRound){
+          setTimeout(() => { try { finishGreenlandLarsDialogue(); } catch(_){} }, trumpDur + 50);
         }
         GL.mette.nextBlink = nowMs() + 2000 + Math.random()*3000;
         GL.mette.blinkUntil = 0;
@@ -6280,9 +7172,9 @@
         addSafe('greenland', 'heli-travel');
           openChoice("Board helicopter?\n1. Bliv på Grønland\n2. Flyv til The White House\n3. Flyv til Moskva (møde)\n4. Epstein files\n5. Flyv til Mar-a-Lago (mini-putt)", k=>{
           closeChoice();
-          if (k==='2'){ switchScene('oval'); }
-          if (k==='3'){ switchScene('kremlin'); }
-          if (k==='4'){ switchScene('epstein'); }
+          if (k==='2'){ switchScene(SCENE.OVAL); }
+          if (k==='3'){ switchScene(SCENE.KREMLIN); }
+          if (k==='4'){ switchScene(SCENE.EPSTEIN); }
           if (k==='5'){ try { SFX.whoosh(); } catch(_){} startGolf('course-mar-a-lago'); }
         });
       }
@@ -6354,9 +7246,9 @@
           addSafe('oval', 'heli-travel');
           openChoice("Board helicopter?\n1. Bliv her\n2. Flyv til Grønland\n3. Flyv til Moskva (møde)\n4. Epstein files\n5. Flyv til Mar-a-Lago (mini-putt)", k=>{
             closeChoice();
-            if (k==='2') { SFX.whoosh(); switchScene('greenland'); }
-            if (k==='3') { SFX.whoosh(); switchScene('kremlin'); }
-            if (k==='4') { SFX.whoosh(); switchScene('epstein'); }
+            if (k==='2') { SFX.whoosh(); switchScene(SCENE.GREENLAND); }
+            if (k==='3') { SFX.whoosh(); switchScene(SCENE.KREMLIN); }
+            if (k==='4') { SFX.whoosh(); switchScene(SCENE.EPSTEIN); }
             if (k==='5') { SFX.whoosh(); startGolf('course-mar-a-lago'); }
           });
         }
@@ -6404,9 +7296,9 @@
           addSafe('kremlin', 'heli-travel');
           openChoice("Board helicopter?\n1. Bliv her\n2. Flyv til Grønland\n3. Flyv til The White House\n4. Epstein files\n5. Flyv til Mar-a-Lago (mini-putt)", k=>{
             closeChoice();
-            if (k==='2') switchScene('greenland');
-            if (k==='3') switchScene('oval');
-            if (k==='4') switchScene('epstein');
+            if (k==='2') switchScene(SCENE.GREENLAND);
+            if (k==='3') switchScene(SCENE.OVAL);
+            if (k==='4') switchScene(SCENE.EPSTEIN);
             if (k==='5') { try { SFX.whoosh(); } catch(_){} startGolf('course-mar-a-lago'); }
           });
         }
@@ -7340,6 +8232,39 @@
     nobelDrop.swingAmp = 0.6; 
   }
 
+  // Greenland flag drop FX state (triggered when Lars defeated)
+  let glFlagDrop = { active:false, y:-80, vy:0, swingPhase:0, swingAmp:0.5 };
+  function startGreenlandFlagDrop(){
+    glFlagDrop.active = true;
+    glFlagDrop.y = -80*CFG.SCALE;
+    glFlagDrop.vy = 0;
+    glFlagDrop.swingPhase = 0;
+    glFlagDrop.swingAmp = 0.5;
+  }
+
+  // Oval Office medal drop FX state (triggered when 100% MAGA approval)
+  let ovalMedalDrop = { active:false, y:-80, vy:0, swingPhase:0, swingAmp:0.5 };
+  function startOvalMedalDrop(){
+    ovalMedalDrop.active = true;
+    ovalMedalDrop.y = -80*CFG.SCALE;
+    ovalMedalDrop.vy = 0;
+    ovalMedalDrop.swingPhase = 0;
+    ovalMedalDrop.swingAmp = 0.5;
+  }
+
+  // Golf/Mar-a-Lago trophy drop FX state (triggered when Trump beats Biden)
+  let golfTrophyDrop = { active:false, y:-80, vy:0, swingPhase:0, swingAmp:0.5, targetX:0, targetY:0 };
+  function startGolfTrophyDrop(){
+    golfTrophyDrop.active = true;
+    golfTrophyDrop.y = -80*CFG.SCALE;
+    golfTrophyDrop.vy = 0;
+    golfTrophyDrop.swingPhase = 0;
+    golfTrophyDrop.swingAmp = 0.5;
+    // Store Trump's position at trigger time
+    golfTrophyDrop.targetX = GOLF.playerStand?.x || W/2;
+    golfTrophyDrop.targetY = GOLF.playerStand?.y || H/2;
+  }
+
   function drawFlagOverlay() {
     if (!flagOverlay) return;
     
@@ -7823,24 +8748,26 @@
       ctx.fillStyle='#f3a32d'; ctx.fillRect(-10,-6,20,6);
     }
     // item in hand: dynamite if selected, otherwise phone (blinking)
+    // Fight mode: offset phone outward on x when punching
+    const fightPhoneOff = window.__fightPunchOut ? 14 * dir : 0;
     const blinking = nowMs() < phoneBlinkUntil && Math.floor(nowMs()/100)%2===0;
     if (player.selectedItem === 'dynamite'){
       ctx.fillStyle='#d32f2f';
-      if (dir<0){ ctx.fillRect(-20,12,6,14); ctx.fillRect(-12,12,6,14); ctx.fillStyle='#333'; ctx.fillRect(-20,16,6,2); ctx.fillRect(-12,16,6,2); }
-      else { ctx.fillStyle='#d32f2f'; ctx.fillRect(10,12,6,14); ctx.fillRect(18,12,6,14); ctx.fillStyle='#333'; ctx.fillRect(10,16,6,2); ctx.fillRect(18,16,6,2); }
+      if (dir<0){ ctx.fillRect(-20+fightPhoneOff,12,6,14); ctx.fillRect(-12+fightPhoneOff,12,6,14); ctx.fillStyle='#333'; ctx.fillRect(-20+fightPhoneOff,16,6,2); ctx.fillRect(-12+fightPhoneOff,16,6,2); }
+      else { ctx.fillStyle='#d32f2f'; ctx.fillRect(10+fightPhoneOff,12,6,14); ctx.fillRect(18+fightPhoneOff,12,6,14); ctx.fillStyle='#333'; ctx.fillRect(10+fightPhoneOff,16,6,2); ctx.fillRect(18+fightPhoneOff,16,6,2); }
     } else {
       ctx.fillStyle='#111';
       if (dir<0){
-        ctx.fillRect(-20,12,10,16);
+        ctx.fillRect(-20+fightPhoneOff,12,10,16);
         ctx.fillStyle = blinking ? '#6ff' : '#09f';
-        ctx.fillRect(-17,16,4,8);
+        ctx.fillRect(-17+fightPhoneOff,16,4,8);
       } else {
-        ctx.fillRect(10,12,10,16);
+        ctx.fillRect(10+fightPhoneOff,12,10,16);
         ctx.fillStyle = blinking ? '#6ff' : '#09f';
-        ctx.fillRect(13,16,4,8);
+        ctx.fillRect(13+fightPhoneOff,16,4,8);
       }
     }
-    ctx.globalAlpha=.2; ctx.fillStyle='#000'; if (dir<0) ctx.fillRect(-14,15,2,10); else ctx.fillRect(12,15,2,10);
+    ctx.globalAlpha=.2; ctx.fillStyle='#000'; if (dir<0) ctx.fillRect(-14+fightPhoneOff,15,2,10); else ctx.fillRect(12+fightPhoneOff,15,2,10);
     ctx.restore();
   }
   // Generalized character drawing system for Trump/Epstein variants
@@ -8204,28 +9131,25 @@
     ctx.fillStyle = '#8b7355';
     ctx.fillRect(-2, -60, 4, 80);
 
-    // Flag waving animation
-    const wave = Math.sin(Date.now() / 300) * 2;
-
     // Flag background (red stripes)
     ctx.fillStyle = '#bf0a30';
-    ctx.fillRect(2, -58 + wave, 35, 24);
+    ctx.fillRect(2, -58, 35, 24);
 
     // White stripes
     ctx.fillStyle = '#fff';
     for (let i = 0; i < 7; i += 2) {
-      ctx.fillRect(2, -58 + wave + i * 3.4, 35, 3.4);
+      ctx.fillRect(2, -58 + i * 3.4, 35, 3.4);
     }
 
     // Blue canton
     ctx.fillStyle = '#002868';
-    ctx.fillRect(2, -58 + wave, 14, 13);
+    ctx.fillRect(2, -58, 14, 13);
 
     // Stars (simplified - just white dots)
     ctx.fillStyle = '#fff';
     for (let row = 0; row < 3; row++) {
       for (let col = 0; col < 3; col++) {
-        ctx.fillRect(4 + col * 4, -56 + wave + row * 4, 2, 2);
+        ctx.fillRect(4 + col * 4, -56 + row * 4, 2, 2);
       }
     }
 
@@ -10402,11 +11326,15 @@
     if (scene === 'golf') {
       golfUpdate(dt);
     }
+    const FE = window.FightEngine || FightEngine;
+    if (FE && FE.active){
+      try { FE.update(dt); } catch(_){}
+    }
 
     // bevægelse (ingen i choice-overlay). Stopper ved auto-walk tween
     // Also block manual movement during Oval Office Presidential Decisions auto-walk
     const ovalAutoWalking = scene === 'oval' && OV.decisions.active && OV.decisions.phase === 'walking';
-    if (scene !== 'golf' && !choiceOverlay && !infoCard && !flagOverlay && !walkTween && !introRunning && !tug && !ovalAutoWalking) {
+    if (!FE.active && scene !== 'golf' && !choiceOverlay && !infoCard && !flagOverlay && !walkTween && !introRunning && !tug && !ovalAutoWalking) {
       let dx=0, dy=0;
       if (keys.has('arrowleft')) dx-=1;
       if (keys.has('arrowright')) dx+=1;
@@ -10441,7 +11369,7 @@
     }
 
     // opdater auto-walk tween
-    stepWalkTween(t);
+    if (!FE.active) stepWalkTween(t);
 
     // speed boost timeout + HUD refresh
     if (speedBoostUntil && nowMs() > speedBoostUntil){ speedBoostUntil=0; player.baseSpeedMul = 1; updatePlayerSpeedMul(); }
@@ -10505,7 +11433,7 @@
       drawMine(GL.mine.x, GL.mine.y);
       // Draw US flag at mine if planted
       if (GL.state.mineFlagPlanted) {
-        drawMineFlagUS(GL.mine.x + 45*CFG.SCALE, GL.mine.y - 40*CFG.SCALE);
+        drawMineFlagUS(GL.mine.x + 45*CFG.SCALE, H - world.floor);
       }
       drawRig(GL.rig.x, GL.rig.y);
       drawShopStall(GL.shop);
@@ -10780,6 +11708,13 @@
     // restore after scene draw
     if (shakeApplied) { /* keep overlay unaffected */ } ctx.restore();
 
+    if (FE && FE.active){
+      try { FE.draw(ctx); } catch(_){}
+      PERF.renderTime = performance.now() - renderStart;
+      requestAnimationFrame(step);
+      return;
+    }
+
     // entry helicopter overlay
     if (entryHeli.active){
       const k = Math.min(1, (nowMs() - entryHeli.start)/entryHeli.dur);
@@ -10973,6 +11908,109 @@
       ctx.fillStyle = '#1e88e5';
       const rw = 4*CFG.SCALE, rh = 18*CFG.SCALE;
       ctx.fillRect(-rw/2, -rh, rw, rh);
+      ctx.restore();
+    }
+
+    // Greenland flag drop overlay (after defeating Lars)
+    if (glFlagDrop && glFlagDrop.active){
+      const headX = player.x;
+      const headY = player.y - 40*CFG.SCALE;
+      // Physics (same feel as Nobel drop)
+      glFlagDrop.vy += 300*dt*CFG.SCALE;
+      glFlagDrop.y += glFlagDrop.vy*dt;
+      glFlagDrop.swingPhase += dt*4;
+      glFlagDrop.swingAmp *= 0.992;
+      const angle = Math.sin(glFlagDrop.swingPhase) * glFlagDrop.swingAmp;
+      if (glFlagDrop.y >= headY){
+        glFlagDrop.y = headY;
+        glFlagDrop.active = false;
+        GS.achievements.greenland = true;
+        spawnConfetti(headX, headY, 60);
+        try { SFX.achievement(); } catch(_){}
+        setTimeout(() => { try { say(player, 'Greenland is mine now.', 3000); } catch(_){} }, 600);
+      }
+      // Draw falling Greenland flag (red/white halves + circle)
+      ctx.save();
+      ctx.translate(headX, glFlagDrop.y);
+      ctx.rotate(angle);
+      const fw = 30*CFG.SCALE, fh = 20*CFG.SCALE;
+      // White top half
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-fw/2, -fh/2, fw, fh/2);
+      // Red bottom half
+      ctx.fillStyle = '#d00c33';
+      ctx.fillRect(-fw/2, 0, fw, fh/2);
+      // Circle (white top, red bottom) — offset left
+      const cr = 6*CFG.SCALE;
+      const ccx = -fw/2 + fw*0.38, ccy = 0;
+      ctx.beginPath(); ctx.arc(ccx, ccy, cr, 0, Math.PI*2); ctx.clip();
+      ctx.fillStyle = '#d00c33';
+      ctx.fillRect(ccx-cr, ccy-cr, cr*2, cr);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(ccx-cr, ccy, cr*2, cr);
+      ctx.restore();
+      // Pole stub
+      ctx.save();
+      ctx.strokeStyle = '#888'; ctx.lineWidth = 2*CFG.SCALE;
+      ctx.beginPath();
+      ctx.moveTo(headX - fw/2, glFlagDrop.y - fh/2);
+      ctx.lineTo(headX - fw/2, glFlagDrop.y + fh/2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Oval Office medal drop overlay (after 100% MAGA approval)
+    if (ovalMedalDrop && ovalMedalDrop.active){
+      const chestX = player.x;
+      const chestY = player.y - 25*CFG.SCALE;
+      // Physics (same feel as Nobel/flag drop)
+      ovalMedalDrop.vy += 300*dt*CFG.SCALE;
+      ovalMedalDrop.y += ovalMedalDrop.vy*dt;
+      ovalMedalDrop.swingPhase += dt*4;
+      ovalMedalDrop.swingAmp *= 0.992;
+      const angle = Math.sin(ovalMedalDrop.swingPhase) * ovalMedalDrop.swingAmp;
+      if (ovalMedalDrop.y >= chestY){
+        ovalMedalDrop.y = chestY;
+        ovalMedalDrop.active = false;
+        GS.achievements.oval = true;
+        spawnConfetti(chestX, chestY, 60);
+        try { SFX.achievement(); } catch(_){}
+        setTimeout(() => { try { say(player, 'I am the greatest president!', 3000); } catch(_){} }, 600);
+      }
+      // Draw gold medal with red/white/blue ribbon
+      ctx.save();
+      ctx.translate(chestX, ovalMedalDrop.y);
+      ctx.rotate(angle);
+      // Ribbon (red/white/blue stripes)
+      const rw = 12*CFG.SCALE, rh = 16*CFG.SCALE;
+      ctx.fillStyle = '#B22234'; // red
+      ctx.fillRect(-rw/2, -rh, rw/3, rh);
+      ctx.fillStyle = '#fff'; // white
+      ctx.fillRect(-rw/2 + rw/3, -rh, rw/3, rh);
+      ctx.fillStyle = '#3C3B6E'; // blue
+      ctx.fillRect(-rw/2 + 2*rw/3, -rh, rw/3, rh);
+      // Gold medal circle
+      const mr = 10*CFG.SCALE;
+      ctx.beginPath();
+      ctx.arc(0, 0, mr, 0, Math.PI*2);
+      ctx.fillStyle = '#FFD700';
+      ctx.fill();
+      ctx.strokeStyle = '#DAA520';
+      ctx.lineWidth = 2*CFG.SCALE;
+      ctx.stroke();
+      // Star on medal
+      ctx.fillStyle = '#DAA520';
+      ctx.beginPath();
+      const sr = 5*CFG.SCALE;
+      for (let i = 0; i < 5; i++){
+        const a = (i * 4 * Math.PI / 5) - Math.PI/2;
+        const x = Math.cos(a) * sr;
+        const y = Math.sin(a) * sr;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
     }
 
