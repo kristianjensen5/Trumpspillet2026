@@ -6,14 +6,25 @@ Formål: Hurtig onboarding for AI. Detaljer findes i:
 
 ## Filer (kort)
 - `index.html` — alt spil (HTML/CSS/JS, scenes, input, render). Filen blev omdøbt fra `Trumpspillet 2026.html` for Cloudflare Pages-publicering.
+- `Trumpspillet2026Mobil.html` — separat mobiltestfil. Aktuelt fokus: portrait-first Greenland-test med touch/intent-tap.
+- `assets/` — spilassets. Tidligere root-assets er flyttet hertil.
+- `assets/music/` — placeholder-struktur til kommende egne musikfiler.
 - `WORKFLOW_ANCHORS.md` — anchors + workflow
 - `START_PROMPT.md` — arbejdskontrakt + seneste ændringer
+
+## Deploy/status
+- Git remote: `https://github.com/kristianjensen5/Trumpspillet2026.git`
+- Cloudflare Pages project: `trumpspillet2026`
+- Production URL: `https://trumpspillet2026.pages.dev/`
+- Mobiltest: `https://trumpspillet2026.pages.dev/Trumpspillet2026Mobil?mobileTest=1`
+- User-regel: deploy som standard efter hver færdig update, medmindre andet aftales.
 
 ## Hot zones (ændr kun med eksplicit OK)
 - Global render/update loop (scene‑gated)
 - `INPUT_GLOBAL_KEYDOWN` (alt tastaturinput)
 - Save/load/localStorage‑logik
 - Fight-input-bridge (`installFightInputBridge` IIFE) — capture-phase listeners + scene-guard + debug telemetri bag `DEBUG_FIGHT_STATE`
+- `Trumpspillet2026Mobil.html` touch-input: ændr kun mobilflowet; desktop `index.html` må ikke røres ved mobiltest uden eksplicit OK.
 
 ## Scene/State‑API (koncept)
 - `resetScene()`‑funktioner initierer scene‑state

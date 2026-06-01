@@ -21,6 +21,49 @@ Følg WORKFLOW_ANCHORS.md. Disse regler er bindende:
 - Jeg bekræfter
 - Du implementerer
 
+## Seneste status (2026-06-01) — Git, Cloudflare og mobiltest
+
+### Git/deploy
+- Projektmappen er nu et git-repo på `main`, tracking `origin/main`.
+- Remote: `https://github.com/kristianjensen5/Trumpspillet2026.git`
+- Seneste commit: `0e97ea6 Improve mobile Greenland intent taps`
+- Git-status ved stop: ren (`main...origin/main`).
+- Cloudflare Pages-projekt oprettet: `trumpspillet2026`
+- Fast testlink: `https://trumpspillet2026.pages.dev/`
+- Mobiltestlink: `https://trumpspillet2026.pages.dev/Trumpspillet2026Mobil?mobileTest=1`
+- Arbejdsregel fra user: Deploy som standard efter hver færdig update, medmindre andet aftales.
+
+### Asset/musikstruktur
+- Assets er flyttet fra roden til `assets/` og registreret som renames i git.
+- `assets/music/README.md` er oprettet som placeholder for kommende musikfiler.
+- Anbefalede fremtidige musikfilnavne: `intro.mp3`, `greenland.mp3`, `oval.mp3`, `kremlin.mp3`, `epstein.mp3`, `golf.mp3`.
+- Musikmotoren er endnu ikke ændret til filbaseret playback; den bruger stadig eksisterende WebAudio/chiptune i `index.html`.
+
+### Mobiltest — Greenland portrait
+Primær testfil: `Trumpspillet2026Mobil.html`.
+
+Implementeret:
+- Forced landscape slået fra.
+- `?mobileTest=1` kan tvinge mobilmode i desktop/emulator.
+- Gamle synlige mobilknapper skjules i testflow.
+- iOS/browser long-press selection/callout slået fra med `user-select:none` og `-webkit-touch-callout:none`.
+- Talebobler i Greenland er gjort større og mere læsbare i mobilmode.
+- Hold venstre/højre side af canvas = Trump går venstre/højre.
+- Kort tap = interaktion.
+- Mobil-only “intent tap” i Greenland:
+  - tap nær butik → auto-walk + åbn butik
+  - tap nær Lars/Mette → auto-walk + tal
+  - tap nær mine/rig/heli/items/glaciers/coins → auto-walk + interagér
+  - tap på tomt område → fallback til `interact()` hvis Trump allerede står tæt på noget
+- Ingen labels/outline må tilføjes til interaktionshjælp; user ønsker usynlig assistance.
+
+Kendte mobil-observationer / næste punkter:
+- Mobilfilen er ældre end desktop: Greenland bruger stadig Mette-figur i stedet for Lars Løkke.
+- Hop mangler i det nye touch-flow. Mulig løsning: swipe-up = `doJump()`.
+- Butikken kan åbnes, men shopknapper er ikke touch-optimeret endnu.
+- Kamera/beskæring er tæt på korrekt, men Trump kan muligvis zoomes lidt større.
+- To-fils-strategi giver vedligeholdelsesrisiko; overvej senere fælles data for dialoger/assets/scene config.
+
 ## Seneste ændringer (2026-04-28) — Continue-skærm + nye game overs
 
 ### Continue-skærm visuelt redesign
