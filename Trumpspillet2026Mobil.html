@@ -1203,30 +1203,74 @@
     mobileRight.addEventListener('pointerleave', e => { e.preventDefault(); clearNavDir(1); });
   }
 
+  function mobileGreenlandTapObjects(){
+    return [
+      GL.mine, GL.mette, GL.rig, GL.shop, GL.heli,
+      ...(GL.bear.alive ? [GL.bear] : []),
+      ...GL.items.filter(it=>!it.collected),
+      ...GL.glaciers.filter(g=>!g.blown),
+      ...GL.coins.filter(c=>!c.collected)
+    ].filter(Boolean);
+  }
+  function mobileTapDistance(obj, x, y){
+    if (obj.type === 'shop'){
+      const halfW = 130*CFG.SCALE;
+      const top = obj.y - 170*CFG.SCALE;
+      const nearestX = clamp(x, obj.x - halfW, obj.x + halfW);
+      const nearestY = clamp(y, top, obj.y);
+      return Math.hypot(x - nearestX, y - nearestY);
+    }
+    if (obj.type === 'heli'){
+      return Math.hypot(x - (obj.x + 20*CFG.SCALE), y - (obj.y - 6*CFG.SCALE));
+    }
+    if (obj.type === 'glacier'){
+      const halfW = (obj.w || 110) * CFG.SCALE * 0.5;
+      const halfH = (obj.h || 220) * CFG.SCALE * 0.5;
+      const nearestX = clamp(x, obj.x - halfW, obj.x + halfW);
+      const nearestY = clamp(y, obj.y - halfH, obj.y + halfH);
+      return Math.hypot(x - nearestX, y - nearestY);
+    }
+    return Math.hypot(x - obj.x, y - obj.y);
+  }
+  function mobileWalkToAndInteract(obj){
+    const need = CFG.INTERACT_DIST*CFG.SCALE - 2;
+    let canInteract = false;
+    if (obj.type === 'heli'){
+      canInteract = heliProximity(obj, player.x, player.y) <= 8*CFG.SCALE;
+    } else {
+      canInteract = Math.hypot(player.x-obj.x, player.y-obj.y) <= need;
+    }
+    if (canInteract){ interact(); return true; }
+
+    const side = Math.sign(obj.x - player.x) || 1;
+    const bounds = getWorldBounds();
+    const targetX = clamp(obj.x - side*need, bounds.minX, bounds.maxX);
+    const dx = Math.abs(targetX - player.x);
+    const dur = Math.min(1100, (dx / (CFG.SPEED*CFG.SCALE)) * 1000 + 180);
+    startWalkTo(targetX, dur, () => interact());
+    return true;
+  }
   function handleMobileTap(x, y){
     if (!canUseMobileTouch()) return false;
     if (choiceOverlay || infoCard || flagOverlay || borderDraw) return false;
     if (introRunning || tug) return false;
 
-    const playerDist = Math.hypot(x - player.x, y - player.y);
-    if (playerDist <= 28*CFG.SCALE){
-      doTweet();
-      return true;
+    const objs = mobileGreenlandTapObjects();
+    let best = null, bd = 1e9;
+    for (const obj of objs){
+      const d = mobileTapDistance(obj, x, y);
+      if (d < bd){ bd = d; best = obj; }
     }
-
-    const heli = scene==='greenland' ? GL.heli : scene==='oval' ? OV.heli : scene==='kremlin' ? KR.heli : null;
-    if (heli){
-      const hx = heli.x + 20*CFG.SCALE;
-      const hy = heli.y - 6*CFG.SCALE;
-      const heliDist = Math.hypot(x - hx, y - hy);
-      if (heliDist <= 80*CFG.SCALE){
-        const bounds = getWorldBounds();
-        const targetX = clamp(heli.x, bounds.minX, bounds.maxX);
-        startWalkTo(targetX, 600);
+    const maxTapDist = 170*CFG.SCALE;
+    if (!best || bd > maxTapDist) {
+      // Empty-area tap fallback: if Trump is already near something, use it.
+      if (nearestGL()){
+        interact();
         return true;
       }
+      return false;
     }
-    return false;
+    return mobileWalkToAndInteract(best);
   }
 
   if (mobileJump){
