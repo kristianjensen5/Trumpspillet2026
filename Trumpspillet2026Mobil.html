@@ -421,7 +421,7 @@
     const configData = loadData('game-config');
     const CFG = configData.CFG || {};
     const GAME_CONSTANTS = configData.GAME_CONSTANTS || {};
-    const MOBILE_FORCE_LANDSCAPE = true;
+    const MOBILE_FORCE_LANDSCAPE = false;
 
     // Load text/dialog data
     const textData = loadData('game-text-data');
@@ -1124,7 +1124,13 @@
     enabled: false,
     landscape: true,
     navDir: 0,
-    lastScene: null
+    lastScene: null,
+    activePointerId: null,
+    downX: 0,
+    downY: 0,
+    downAt: 0,
+    navTimer: null,
+    suppressClickUntil: 0
   };
   const mobileUI = document.getElementById('mobile-ui');
   const mobileLeft = document.getElementById('mobile-left');
@@ -1135,6 +1141,7 @@
 
   function isMobileCandidate(){
     try {
+      if (new URLSearchParams(location.search).get('mobileTest') === '1') return true;
       const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
       const small = Math.min(innerWidth, innerHeight) < 900;
       return coarse && small;
@@ -1143,13 +1150,16 @@
     }
   }
   function shouldShowMobileControls(){
-    if (!MOBILE.enabled || !MOBILE.landscape) return false;
-    if (scene === 'epstein' || scene === 'golf' || scene === 'intro') return false;
-    return true;
+    // Portrait test uses full-canvas tap/hold zones instead of visible buttons.
+    return false;
+  }
+  function canUseMobileTouch(){
+    if (!MOBILE.enabled) return false;
+    return scene === 'greenland';
   }
   function updateMobileUI(){
     MOBILE.enabled = isMobileCandidate();
-    MOBILE.landscape = MOBILE_FORCE_LANDSCAPE ? true : (innerWidth >= innerHeight);
+    MOBILE.landscape = true;
     const show = shouldShowMobileControls();
     if (mobileUI){
       if (show){
@@ -1173,11 +1183,11 @@
   try { updateMobileUI(); } catch(_){}
 
   function setNavDir(dir){
-    if (!shouldShowMobileControls()) return;
+    if (!canUseMobileTouch()) return;
     MOBILE.navDir = dir;
   }
   function clearNavDir(dir){
-    if (!shouldShowMobileControls()) return;
+    if (!canUseMobileTouch()) return;
     if (MOBILE.navDir === dir) MOBILE.navDir = 0;
   }
   if (mobileLeft){
@@ -1194,8 +1204,7 @@
   }
 
   function handleMobileTap(x, y){
-    if (!MOBILE.enabled || !MOBILE.landscape) return false;
-    if (scene === 'epstein' || scene === 'golf' || scene === 'intro') return false;
+    if (!canUseMobileTouch()) return false;
     if (choiceOverlay || infoCard || flagOverlay || borderDraw) return false;
     if (introRunning || tug) return false;
 
@@ -1385,7 +1394,7 @@
   const BASE_WORLD_WIDTH = 1200;
   let cameraX = 0;
   function isCameraScene(){
-    if (!MOBILE || !MOBILE.enabled || !MOBILE.landscape) return false;
+    if (!MOBILE || !MOBILE.enabled) return false;
     if (scene === 'epstein' || scene === 'golf' || scene === 'intro') return false;
     return true;
   }
@@ -5482,16 +5491,20 @@
   }
   const mouse = { x:0, y:0, active:false };
   let mouseMoveThrottle = 0;
+  function pointerToWorld(e){
+    const p = toCanvasCoords(e, cvs);
+    const camX = isCameraScene() ? cameraX : 0;
+    return { x: p.x / DPR + camX, y: p.y / DPR, screenX: p.x / DPR, screenY: p.y / DPR };
+  }
   cvs.addEventListener('mousemove', e=>{
     const now = performance.now();
     if (now - mouseMoveThrottle < (GAME_CONSTANTS.PERFORMANCE && GAME_CONSTANTS.PERFORMANCE.MOUSE_THROTTLE_MS || 16)) return; // ~60fps throttle
     mouseMoveThrottle = now;
     
-    const p = toCanvasCoords(e, cvs);
-    const camX = isCameraScene() ? cameraX : 0;
+    const p = pointerToWorld(e);
     // World coords use CSS pixels; ctx is scaled by DPR → divide back
-    mouse.x = p.x / DPR + camX;
-    mouse.y = p.y / DPR;
+    mouse.x = p.x;
+    mouse.y = p.y;
     mouse.active = true;
     // Golf-specific drag logic is handled by golf pointer handlers
 
@@ -5508,6 +5521,63 @@
     isDrawing=false; 
     // Golf pointer capture handles cancellation
   });
+
+  cvs.addEventListener('pointerdown', e=>{
+    if (!canUseMobileTouch()) return;
+    if (choiceOverlay || infoCard || flagOverlay || borderDraw || scene === 'golf') return;
+    const p = pointerToWorld(e);
+    MOBILE.activePointerId = e.pointerId;
+    MOBILE.downX = p.screenX;
+    MOBILE.downY = p.screenY;
+    MOBILE.downAt = nowMs();
+    mouse.x = p.x;
+    mouse.y = p.y;
+    mouse.active = true;
+
+    const side = p.screenX < (W / 2) ? -1 : 1;
+    if (MOBILE.navTimer) clearTimeout(MOBILE.navTimer);
+    MOBILE.navTimer = setTimeout(()=>{ setNavDir(side); }, 120);
+    try { cvs.setPointerCapture(e.pointerId); } catch(_){}
+    e.preventDefault();
+  }, { passive:false });
+
+  cvs.addEventListener('pointerup', e=>{
+    if (MOBILE.activePointerId !== e.pointerId) return;
+    const p = pointerToWorld(e);
+    const dt = nowMs() - MOBILE.downAt;
+    const moved = Math.hypot(p.screenX - MOBILE.downX, p.screenY - MOBILE.downY);
+    if (MOBILE.navTimer) { clearTimeout(MOBILE.navTimer); MOBILE.navTimer = null; }
+    clearNavDir(MOBILE.navDir);
+    MOBILE.activePointerId = null;
+    MOBILE.suppressClickUntil = nowMs() + 350;
+    try { cvs.releasePointerCapture(e.pointerId); } catch(_){}
+
+    if (canUseMobileTouch() && dt < 240 && moved < 14*CFG.SCALE) {
+      mouse.x = p.x;
+      mouse.y = p.y;
+      if (!handleMobileTap(mouse.x, mouse.y)) interact();
+    }
+    e.preventDefault();
+  }, { passive:false });
+
+  cvs.addEventListener('pointermove', e=>{
+    if (MOBILE.activePointerId !== e.pointerId || !canUseMobileTouch()) return;
+    const p = pointerToWorld(e);
+    mouse.x = p.x;
+    mouse.y = p.y;
+    if (MOBILE.navDir) {
+      setNavDir(p.screenX < (W / 2) ? -1 : 1);
+    }
+    e.preventDefault();
+  }, { passive:false });
+
+  cvs.addEventListener('pointercancel', e=>{
+    if (MOBILE.activePointerId !== e.pointerId) return;
+    if (MOBILE.navTimer) { clearTimeout(MOBILE.navTimer); MOBILE.navTimer = null; }
+    clearNavDir(MOBILE.navDir);
+    MOBILE.activePointerId = null;
+    MOBILE.suppressClickUntil = nowMs() + 250;
+  }, { passive:false });
   
   // Enhanced drawing events
   cvs.addEventListener('mousedown', e=>{
@@ -5549,7 +5619,7 @@
   function stepWalkTween(t){
     if (!walkTween) {
       // Not walking with tween
-      if (player.walking && !keys.has('arrowleft') && !keys.has('arrowright') && !keys.has('arrowup') && !keys.has('arrowdown')) {
+      if (player.walking && !keys.has('arrowleft') && !keys.has('arrowright') && !keys.has('arrowup') && !keys.has('arrowdown') && !(MOBILE && MOBILE.navDir)) {
         player.walking = false;
         player.walkCycle = 0;
       }
@@ -5627,6 +5697,10 @@
     return {obj:best, dist:bd};
   }
   cvs.addEventListener('click', e=>{
+    if (MOBILE && nowMs() < MOBILE.suppressClickUntil) {
+      e.preventDefault();
+      return;
+    }
     // Handle intro screen clicks
     if (scene === 'intro') {
       startGame();
@@ -5634,10 +5708,9 @@
     }
 
     if (MOBILE && MOBILE.enabled){
-      const p = toCanvasCoords(e, cvs);
-      const camX = isCameraScene() ? cameraX : 0;
-      mouse.x = p.x / DPR + camX;
-      mouse.y = p.y / DPR;
+      const p = pointerToWorld(e);
+      mouse.x = p.x;
+      mouse.y = p.y;
     }
     
     if (choiceOverlay) return;
@@ -8120,7 +8193,7 @@
       if (keys.has('arrowright')) dx+=1;
       if (keys.has('arrowup')) dy-=1;
       if (keys.has('arrowdown')) dy+=1;
-      if (MOBILE && MOBILE.enabled && MOBILE.landscape){
+      if (MOBILE && MOBILE.enabled){
         if (MOBILE.navDir) dx += Math.sign(MOBILE.navDir);
       }
       const len=Math.hypot(dx,dy)||1;
