@@ -2014,6 +2014,7 @@
   };
 
   const Music = {
+    disabled: true,
     masterGain: null,
     trackGain: null,      // per-track gain node (allows fading out current track without killing masterGain)
     current: null,        // currently playing track name (when loopTimer active)
@@ -2030,6 +2031,7 @@
     },
 
     start(trackName){
+      if (this.disabled) return;
       if (!trackName) return;
       if (this.current === trackName && this.loopTimer) return; // already playing
       try { ensureAudioInit(); } catch(_){}
@@ -2125,6 +2127,7 @@
     },
 
     setMuted(muted){
+      if (this.disabled) return;
       this.muted = !!muted;
       if (this.masterGain && audioContext){
         this.masterGain.gain.linearRampToValueAtTime(
